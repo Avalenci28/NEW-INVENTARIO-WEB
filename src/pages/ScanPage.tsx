@@ -84,7 +84,11 @@ export const ScanPage: React.FC = () => {
 
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: {facingMode: {ideal: 'environment'}},
+          video: {
+            facingMode: {ideal: 'environment'},
+            width: {ideal: 1280},
+            height: {ideal: 720},
+          },
           audio: false,
         });
         if (cancelled) {
@@ -94,9 +98,16 @@ export const ScanPage: React.FC = () => {
         streamRef.current = stream;
         const video = videoRef.current;
         if (video) {
+          video.muted = true;
+          video.playsInline = true;
+          video.setAttribute('playsinline', '');
+          video.setAttribute('muted', '');
+          video.setAttribute('autoplay', '');
           video.srcObject = stream;
           const markReady = () => {
-            if (!cancelled && video.videoWidth > 0 && video.videoHeight > 0) {
+            if (cancelled) return;
+            void video.play().catch(() => undefined);
+            if (video.videoWidth > 0 && video.videoHeight > 0) {
               setCameraReady(true);
               setCameraError(null);
             }
@@ -229,6 +240,116 @@ export const ScanPage: React.FC = () => {
     };
   }, [mode, cameraReady, matchedProduct, handleBarcodeFound]);
 
+  const postRecognizeWithRetry = useCallback(
+    async (
+      dataUrl: string,
+      mimeType: string,
+    ): Promise<{
+      ok: boolean;
+      status?: number;
+      error?: string;
+      data?: {
+        isGarment?: boolean;
+        name?: string;
+        category?: GarmentCategory;
+        color?: string;
+        confidence?: number;
+        error?: string;
+      };
+    }> => {
+      const payload = JSON.stringify({
+        imageBase64: dataUrl,
+        mimeType,
+        userId: user?.uid,
+      });
+
+      let lastErr: unknown;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), 20000);
+        try {
+          const res = await fetch('/api/recognize', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: payload,
+            cache: 'no-store',
+            credentials: 'same-origin',
+            signal: controller.signal,
+          });
+          window.clearTimeout(timeoutId);
+
+          const rawText = await res.text();
+          let parsedData: {
+            isGarment?: boolean;
+            name?: string;
+            category?: GarmentCategory;
+            color?: string;
+            confidence?: number;
+            error?: string;
+          } | null = null;
+
+          if (rawText) {
+            try {
+              parsedData = JSON.parse(rawText) as NonNullable<typeof parsedData>;
+            } catch {
+              parsedData = null;
+            }
+          }
+
+          if (!parsedData) {
+            if ((res.status === 502 || res.status === 504) && attempt === 0) {
+              await new Promise((r) => window.setTimeout(r, 400));
+              continue;
+            }
+            if (res.status === 413) {
+              return {
+                ok: false,
+                error: 'La foto es muy pesada. Acércate un poco más o intenta con otra foto.',
+              };
+            }
+            if (res.status === 401 || res.status === 403 || res.redirected) {
+              return {
+                ok: false,
+                error: 'Tu sesión expiró. Recarga la página o vuelve a iniciar sesión.',
+              };
+            }
+            return {
+              ok: false,
+              error: 'El servidor de IA tardó en responder. Toca "Reintentar con IA".',
+            };
+          }
+
+          return {ok: res.ok, status: res.status, data: parsedData};
+        } catch (err) {
+          window.clearTimeout(timeoutId);
+          lastErr = err;
+          if (attempt === 0) {
+            await new Promise((r) => window.setTimeout(r, 350));
+            continue;
+          }
+        }
+      }
+
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        return {
+          ok: false,
+          error: 'Sin conexión a internet. Verifica tu Wi-Fi o datos móviles e intenta de nuevo.',
+        };
+      }
+      if (lastErr instanceof Error && lastErr.name === 'AbortError') {
+        return {
+          ok: false,
+          error: 'El análisis tardó demasiado. Toca "Reintentar con IA" o elige una foto más nítida.',
+        };
+      }
+      return {
+        ok: false,
+        error: 'No pudimos conectar con el servicio de IA. Toca "Reintentar con IA" o registra a mano.',
+      };
+    },
+    [user?.uid],
+  );
+
   const recognizeImage = useCallback(
     async (dataUrl: string, mimeType: string, isAuto: boolean = false) => {
       setAnalyzing(true);
@@ -237,31 +358,17 @@ export const ScanPage: React.FC = () => {
       setLastCaptured({dataUrl, mimeType});
 
       try {
-        const res = await fetch('/api/recognize', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            imageBase64: dataUrl,
-            mimeType,
-            userId: user?.uid,
-          }),
-        });
-        const data = (await res.json()) as {
-          isGarment?: boolean;
-          name?: string;
-          category?: GarmentCategory;
-          color?: string;
-          confidence?: number;
-          error?: string;
-        };
+        const result = await postRecognizeWithRetry(dataUrl, mimeType);
+        const data = result.data;
 
-        if (!res.ok || !data.name) {
-          setAiError(
-            data.error ||
-              'No pudimos reconocer la prenda en este momento. Intenta tomar otra foto.',
-          );
+        if (!result.ok || !data || !data.name) {
+          const msg =
+            data?.error ||
+            result.error ||
+            'No pudimos reconocer la prenda en este momento. Intenta tomar otra foto.';
+          setAiError(msg);
           if (!isAuto) {
-            showToast(data.error || 'No pudimos analizar la imagen con la IA.', 'error');
+            showToast(msg, 'error');
           }
           return;
         }
@@ -283,7 +390,7 @@ export const ScanPage: React.FC = () => {
           imageUrl: dataUrl,
         });
       } catch {
-        const msg = 'No hubo conexión con el servicio de IA. Revisa tu red e intenta de nuevo.';
+        const msg = 'No pudimos conectar con el servicio de IA. Toca "Reintentar con IA".';
         setAiError(msg);
         if (!isAuto) {
           showToast(msg, 'error');
@@ -292,7 +399,7 @@ export const ScanPage: React.FC = () => {
         setAnalyzing(false);
       }
     },
-    [user?.uid, showToast],
+    [postRecognizeWithRetry, showToast],
   );
 
   // Reconocimiento automático inicial cuando la cámara enfoca una prenda
@@ -311,9 +418,13 @@ export const ScanPage: React.FC = () => {
     const timer = window.setTimeout(() => {
       const video = videoRef.current;
       if (!video || autoScanRanRef.current) return;
-      autoScanRanRef.current = true;
       try {
-        const {dataUrl, mimeType} = captureVideoFrame(video, 768, 0.8);
+        const {dataUrl, mimeType, isDark} = captureVideoFrame(video, 640, 0.72);
+        if (isDark) {
+          // Si el sensor de iPhone aún estaba oscuro al iniciar, no gastar petición
+          return;
+        }
+        autoScanRanRef.current = true;
         void recognizeImage(dataUrl, mimeType, true);
       } catch {
         // Si el primer frame aún no estaba listo, el usuario puede tocar el botón
@@ -336,7 +447,7 @@ export const ScanPage: React.FC = () => {
     }
     try {
       setDetected(null);
-      const {dataUrl, mimeType} = captureVideoFrame(video, 768, 0.8);
+      const {dataUrl, mimeType} = captureVideoFrame(video, 640, 0.72);
       await recognizeImage(dataUrl, mimeType, false);
     } catch {
       showToast('No se pudo capturar la foto. Intenta desde la galería.', 'error');
@@ -349,7 +460,7 @@ export const ScanPage: React.FC = () => {
     if (!file) return;
     try {
       setDetected(null);
-      const {dataUrl, mimeType} = await compressImageFile(file, 768, 0.8);
+      const {dataUrl, mimeType} = await compressImageFile(file, 640, 0.72);
       await recognizeImage(dataUrl, mimeType, false);
     } catch {
       showToast('No pudimos leer esa imagen.', 'error');

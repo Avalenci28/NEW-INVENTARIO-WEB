@@ -1,7 +1,7 @@
 export async function compressImageFile(
   file: Blob,
-  maxDimension: number = 768,
-  quality: number = 0.8,
+  maxDimension: number = 640,
+  quality: number = 0.72,
 ): Promise<{dataUrl: string; mimeType: string}> {
   const bitmapUrl = URL.createObjectURL(file);
   try {
@@ -35,9 +35,9 @@ export async function compressImageFile(
 
 export function captureVideoFrame(
   video: HTMLVideoElement,
-  maxDimension: number = 768,
-  quality: number = 0.8,
-): {dataUrl: string; mimeType: string} {
+  maxDimension: number = 640,
+  quality: number = 0.72,
+): {dataUrl: string; mimeType: string; isDark: boolean} {
   if (video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
     throw new Error('La cámara aún está enfocando. Intenta de nuevo en un momento.');
   }
@@ -57,6 +57,25 @@ export function captureVideoFrame(
     throw new Error('No se pudo capturar la imagen de la cámara.');
   }
   ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
+
+  let isDark = false;
+  try {
+    const sample = ctx.getImageData(0, 0, targetWidth, targetHeight).data;
+    let totalLum = 0;
+    let count = 0;
+    const step = Math.max(4, Math.floor(sample.length / 400)) * 4;
+    for (let i = 0; i < sample.length; i += step) {
+      totalLum += sample[i] + sample[i + 1] + sample[i + 2];
+      count += 3;
+    }
+    isDark = count > 0 && totalLum / count < 6;
+  } catch {
+    isDark = false;
+  }
+
   const dataUrl = canvas.toDataURL('image/jpeg', quality);
-  return {dataUrl, mimeType: 'image/jpeg'};
+  if (!dataUrl.startsWith('data:image/') || dataUrl.length < 100) {
+    throw new Error('La cámara aún está cargando la imagen.');
+  }
+  return {dataUrl, mimeType: 'image/jpeg', isDark};
 }

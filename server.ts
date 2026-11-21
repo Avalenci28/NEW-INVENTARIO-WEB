@@ -17,6 +17,10 @@ const GEMINI_FALLBACK_MODEL = 'gemini-3.1-flash-lite';
 
 app.use(express.json({limit: '8mb'}));
 
+app.get('/api/health', (_req, res) => {
+  res.json({ok: true});
+});
+
 // Configuración pública de Firebase Web para el Service Worker de FCM
 app.get('/firebase-sw-config.js', (_req, res) => {
   try {
@@ -180,12 +184,12 @@ function isTransientGeminiError(err: unknown): boolean {
 async function generateWithResilience(
   ai: GoogleGenAI,
   params: Omit<Parameters<GoogleGenAI['models']['generateContent']>[0], 'model'>,
-  timeoutMs: number = 12000,
+  timeoutMs: number = 9000,
 ) {
-  const attempts: Array<{model: string; delayMs: number}> = [
-    {model: GEMINI_MODEL, delayMs: 0},
-    {model: GEMINI_FALLBACK_MODEL, delayMs: 350},
-    {model: GEMINI_FALLBACK_MODEL, delayMs: 750},
+  const attempts: Array<{model: string; delayMs: number; timeoutMs: number}> = [
+    {model: GEMINI_MODEL, delayMs: 0, timeoutMs: 4500},
+    {model: GEMINI_FALLBACK_MODEL, delayMs: 150, timeoutMs},
+    {model: GEMINI_FALLBACK_MODEL, delayMs: 450, timeoutMs},
   ];
 
   let lastError: unknown;
@@ -195,9 +199,13 @@ async function generateWithResilience(
       await new Promise((resolve) => setTimeout(resolve, attempt.delayMs));
     }
     try {
+      const baseConfig = {...(params.config || {})};
+      if (attempt.model === GEMINI_FALLBACK_MODEL) {
+        baseConfig.thinkingConfig = {thinkingLevel: ThinkingLevel.MINIMAL};
+      }
       const config = {
-        ...(params.config || {}),
-        abortSignal: AbortSignal.timeout(i === 0 ? Math.min(timeoutMs, 8000) : timeoutMs),
+        ...baseConfig,
+        abortSignal: AbortSignal.timeout(attempt.timeoutMs),
       };
       return await ai.models.generateContent({
         ...params,
@@ -586,6 +594,33 @@ app.post('/api/assistant', async (req, res) => {
     res.json({...fallback, source: 'rules'});
   }
 });
+
+app.use(
+  (
+    err: unknown,
+    req: express.Request,
+    res: express.Response,
+    next: express.NextFunction,
+  ) => {
+    if (!req.path.startsWith('/api/')) {
+      next(err);
+      return;
+    }
+    const status =
+      typeof (err as {status?: number})?.status === 'number'
+        ? (err as {status: number}).status
+        : 400;
+    if (status === 413) {
+      res.status(413).json({
+        error: 'La foto es demasiado pesada para analizarla. Toma una foto más cercana o usa otra.',
+      });
+      return;
+    }
+    res.status(status).json({
+      error: 'No se pudo procesar la solicitud de imagen. Intenta de nuevo.',
+    });
+  },
+);
 
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
