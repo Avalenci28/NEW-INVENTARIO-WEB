@@ -26,6 +26,27 @@ interface AuthContextValue {
 }
 
 const DEMO_PROFILE_KEY = 'inventario_facil_demo_profile_v1';
+const DEMO_TOKEN_KEY = 'inventario_facil_demo_token_v1';
+
+function readStoredToken(): string | null {
+  try {
+    return window.localStorage.getItem(DEMO_TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function saveStoredToken(token: string | null): void {
+  try {
+    if (token) {
+      window.localStorage.setItem(DEMO_TOKEN_KEY, token);
+    } else {
+      window.localStorage.removeItem(DEMO_TOKEN_KEY);
+    }
+  } catch {
+    // Ignorar errores en modo privado de Safari
+  }
+}
 
 function loadSavedDemoProfile(userId: string, email: string): UserProfile {
   const defaults: UserProfile = {
@@ -71,8 +92,50 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export const AuthProvider: React.FC<{children: React.ReactNode}> = ({children}) => {
   const [user, setUser] = useState<AppUser | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
-  const [authToken, setAuthToken] = useState<string | null>(null);
-  const [loading] = useState(false);
+  const [authToken, setAuthToken] = useState<string | null>(() => readStoredToken());
+  const [loading, setLoading] = useState<boolean>(() => Boolean(readStoredToken()));
+
+  React.useEffect(() => {
+    const token = readStoredToken();
+    if (!token) {
+      setLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch('/api/demo-session', {
+          method: 'GET',
+          headers: {Authorization: `Bearer ${token}`},
+          cache: 'no-store',
+        });
+        if (!res.ok) {
+          saveStoredToken(null);
+          if (!cancelled) {
+            setAuthToken(null);
+            setUser(null);
+            setProfile(null);
+          }
+          return;
+        }
+        const data = (await res.json()) as {user?: AppUser};
+        if (data.user && !cancelled) {
+          setAuthToken(token);
+          setUser(data.user);
+          setProfile(loadSavedDemoProfile(data.user.uid, data.user.email));
+        }
+      } catch {
+        // Si no hay conexión temporal al recargar con token local válido, mantener estado limpio
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const loginWithDemo = useCallback(async (username: string, password: string) => {
     const cleanUser = username.trim();
@@ -98,6 +161,7 @@ export const AuthProvider: React.FC<{children: React.ReactNode}> = ({children}) 
       );
     }
 
+    saveStoredToken(data.token);
     setAuthToken(data.token);
     setUser(data.user);
     setProfile(loadSavedDemoProfile(data.user.uid, data.user.email));
@@ -147,6 +211,7 @@ export const AuthProvider: React.FC<{children: React.ReactNode}> = ({children}) 
   );
 
   const logout = useCallback(async () => {
+    saveStoredToken(null);
     setAuthToken(null);
     setUser(null);
     setProfile(null);

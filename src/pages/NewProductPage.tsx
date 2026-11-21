@@ -6,12 +6,15 @@ import {MobileShell} from '../components/MobileShell';
 import {SpaceFormSheet} from '../components/SpaceFormSheet';
 import {useInventory} from '../context/InventoryContext';
 import {useToast} from '../context/ToastContext';
+import {formatInventoryError} from '../lib/firebase';
 import {computeAutoMinStock} from '../lib/inventoryAnalytics';
 import type {GarmentCategory} from '../types/inventory';
 
 interface LocationState {
   name?: string;
+  brand?: string;
   category?: GarmentCategory;
+  barcode?: string;
   color?: string;
   imageUrl?: string;
   aiRecognized?: boolean;
@@ -40,9 +43,10 @@ export const NewProductPage: React.FC = () => {
 
   const state = (location.state as LocationState | null) || {};
   const defaultSpaceId = searchParams.get('spaceId') || spaces[0]?.id || '';
-  const initialBarcode = searchParams.get('barcode') || '';
+  const initialBarcode = searchParams.get('barcode') || state.barcode || '';
 
   const [name, setName] = useState(state.name || '');
+  const [brand, setBrand] = useState(state.brand || '');
   const [category, setCategory] = useState<GarmentCategory>(state.category || 'camiseta');
   const [color] = useState(state.color || 'Blanco');
   const [imageUrl] = useState(state.imageUrl || '');
@@ -90,18 +94,25 @@ export const NewProductPage: React.FC = () => {
       return;
     }
 
+    const cleanName = name.trim();
+    const cleanBrand = brand.trim();
+    const finalName =
+      cleanBrand && !cleanName.toLowerCase().includes(cleanBrand.toLowerCase())
+        ? `${cleanName} · ${cleanBrand}`.slice(0, 120)
+        : cleanName.slice(0, 120);
+
     setSaving(true);
     try {
       await createProduct({
         spaceId,
-        name: name.trim(),
+        name: finalName,
         category,
         size: size.trim() || 'Única',
         color,
         quantity,
         minStock: autoMinStock ? recommendedMin : minStock,
         autoMinStock,
-        barcode,
+        barcode: barcode.trim(),
         imageUrl,
         aiRecognized,
         expiresAt: expiresAt.trim(),
@@ -109,7 +120,7 @@ export const NewProductPage: React.FC = () => {
       showToast('Prenda guardada en tu inventario.');
       navigate(`/espacios/${spaceId}`, {replace: true});
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'No se pudo guardar la prenda.', 'error');
+      showToast(formatInventoryError(err, 'No se pudo guardar la prenda.'), 'error');
     } finally {
       setSaving(false);
     }
@@ -166,6 +177,21 @@ export const NewProductPage: React.FC = () => {
               onChange={(e) => setName(e.target.value)}
               placeholder="Ej. Camiseta blanca"
               maxLength={120}
+              className="min-h-[48px] w-full rounded-[12px] border border-slate-200 bg-white px-3.5 text-base font-semibold text-[#071C2D] focus:border-[#1F69FC] focus:outline-none"
+            />
+          </div>
+
+          {/* Marca (opcional) */}
+          <div>
+            <label className="mb-1.5 block text-xs font-semibold text-[#5C7B98]">
+              Marca (opcional)
+            </label>
+            <input
+              type="text"
+              value={brand}
+              onChange={(e) => setBrand(e.target.value)}
+              placeholder="Ej. Arturo Calle, Nike o dejar vacío"
+              maxLength={50}
               className="min-h-[48px] w-full rounded-[12px] border border-slate-200 bg-white px-3.5 text-base font-semibold text-[#071C2D] focus:border-[#1F69FC] focus:outline-none"
             />
           </div>
@@ -341,17 +367,34 @@ export const NewProductPage: React.FC = () => {
             </div>
           </div>
 
-          {barcode && (
-            <div className="flex items-center justify-between rounded-xl bg-[#E6EEFF]/60 px-3.5 py-2.5 text-xs text-[#1F69FC]">
-              <span className="flex items-center gap-2 font-semibold">
-                <Barcode className="h-4 w-4" />
-                Código: {barcode}
-              </span>
-              <button type="button" onClick={() => setBarcode('')} className="font-bold underline">
-                Quitar
-              </button>
+          {/* Código de barras (opcional) */}
+          <div>
+            <div className="mb-1.5 flex items-center justify-between">
+              <label className="text-xs font-semibold text-[#5C7B98]">
+                Código de barras (opcional)
+              </label>
+              {barcode && (
+                <button
+                  type="button"
+                  onClick={() => setBarcode('')}
+                  className="text-xs font-bold text-[#1F69FC]"
+                >
+                  Limpiar
+                </button>
+              )}
             </div>
-          )}
+            <div className="flex min-h-[48px] items-center gap-2.5 rounded-[12px] border border-slate-200 bg-white px-3.5">
+              <Barcode className="h-4 w-4 shrink-0 text-[#1F69FC]" />
+              <input
+                type="text"
+                value={barcode}
+                onChange={(e) => setBarcode(e.target.value)}
+                placeholder="Ej. 770100100102"
+                maxLength={64}
+                className="w-full bg-transparent text-base font-semibold text-[#071C2D] focus:outline-none"
+              />
+            </div>
+          </div>
 
           <button
             type="submit"

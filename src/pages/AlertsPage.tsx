@@ -6,6 +6,7 @@ import {NotificationSettingsSheet} from '../components/NotificationSettingsSheet
 import {OrderDraftSheet} from '../components/OrderDraftSheet';
 import {useInventory} from '../context/InventoryContext';
 import {useToast} from '../context/ToastContext';
+import {formatInventoryError} from '../lib/firebase';
 import type {AlertSeverity, LowStockAlertItem} from '../types/inventory';
 
 type FilterMode = 'all' | AlertSeverity;
@@ -50,7 +51,7 @@ export const AlertsPage: React.FC = () => {
       await addAlertToDraftOrder(alert);
       showToast(`${alert.product.name} agregado al pedido (+${alert.suggestedQty} uds).`);
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'No se pudo agregar al pedido.', 'error');
+      showToast(formatInventoryError(err, 'No se pudo agregar al pedido.'), 'error');
     } finally {
       setAddingId(null);
     }

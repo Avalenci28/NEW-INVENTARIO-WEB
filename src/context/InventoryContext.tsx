@@ -189,7 +189,10 @@ export const InventoryProvider: React.FC<{children: React.ReactNode}> = ({childr
         setSpaces(snap.docs.map((d) => ({id: d.id, ...(d.data() as Omit<Space, 'id'>)})));
         markLoaded();
       },
-      (err) => handleFirestoreError(err, OperationType.LIST, spacesPath),
+      (err) => {
+        setLoadingData(false);
+        handleFirestoreError(err, OperationType.LIST, spacesPath);
+      },
     );
 
     const productsPath = `users/${uid}/products`;
@@ -199,7 +202,10 @@ export const InventoryProvider: React.FC<{children: React.ReactNode}> = ({childr
         setProducts(snap.docs.map((d) => ({id: d.id, ...(d.data() as Omit<Product, 'id'>)})));
         markLoaded();
       },
-      (err) => handleFirestoreError(err, OperationType.LIST, productsPath),
+      (err) => {
+        setLoadingData(false);
+        handleFirestoreError(err, OperationType.LIST, productsPath);
+      },
     );
 
     const movementsPath = `users/${uid}/movements`;
@@ -211,7 +217,10 @@ export const InventoryProvider: React.FC<{children: React.ReactNode}> = ({childr
         setMovements(list);
         markLoaded();
       },
-      (err) => handleFirestoreError(err, OperationType.LIST, movementsPath),
+      (err) => {
+        setLoadingData(false);
+        handleFirestoreError(err, OperationType.LIST, movementsPath);
+      },
     );
 
     const ordersPath = `users/${uid}/orders`;
@@ -222,7 +231,10 @@ export const InventoryProvider: React.FC<{children: React.ReactNode}> = ({childr
         setOrders(list);
         markLoaded();
       },
-      (err) => handleFirestoreError(err, OperationType.LIST, ordersPath),
+      (err) => {
+        setLoadingData(false);
+        handleFirestoreError(err, OperationType.LIST, ordersPath);
+      },
     );
 
     const tokensPath = `users/${uid}/fcmTokens`;
@@ -233,7 +245,10 @@ export const InventoryProvider: React.FC<{children: React.ReactNode}> = ({childr
           snap.docs.map((d) => ({id: d.id, ...(d.data() as Omit<FcmDeviceToken, 'id'>)})),
         );
       },
-      (err) => handleFirestoreError(err, OperationType.LIST, tokensPath),
+      (err) => {
+        setLoadingData(false);
+        handleFirestoreError(err, OperationType.LIST, tokensPath);
+      },
     );
 
     const prefsPath = `users/${uid}/notificationSettings/prefs`;
@@ -251,7 +266,10 @@ export const InventoryProvider: React.FC<{children: React.ReactNode}> = ({childr
           });
         }
       },
-      (err) => handleFirestoreError(err, OperationType.GET, prefsPath),
+      (err) => {
+        setLoadingData(false);
+        handleFirestoreError(err, OperationType.GET, prefsPath);
+      },
     );
 
     return () => {

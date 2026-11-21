@@ -3,6 +3,7 @@ import {AnimatePresence, motion} from 'motion/react';
 import {Check, Layers, MapPin, Trash2, X} from 'lucide-react';
 import {useInventory} from '../context/InventoryContext';
 import {useToast} from '../context/ToastContext';
+import {formatInventoryError} from '../lib/firebase';
 import type {Space, SpaceColor, SpaceType} from '../types/inventory';
 
 interface SpaceFormSheetProps {
@@ -91,7 +92,7 @@ export const SpaceFormSheet: React.FC<SpaceFormSheetProps> = ({
       }
       onClose();
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'No se pudo guardar el espacio.', 'error');
+      showToast(formatInventoryError(err, 'No se pudo guardar el espacio.'), 'error');
     } finally {
       setSaving(false);
     }
@@ -110,7 +111,7 @@ export const SpaceFormSheet: React.FC<SpaceFormSheetProps> = ({
       onClose();
       onDeleted?.();
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'No se pudo eliminar el espacio.', 'error');
+      showToast(formatInventoryError(err, 'No se pudo eliminar el espacio.'), 'error');
     } finally {
       setSaving(false);
     }

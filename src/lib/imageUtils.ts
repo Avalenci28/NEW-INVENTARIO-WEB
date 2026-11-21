@@ -1,20 +1,53 @@
+function loadImageElement(file: Blob): Promise<HTMLImageElement> {
+  const bitmapUrl = URL.createObjectURL(file);
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(bitmapUrl);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(bitmapUrl);
+      reject(new Error('No se pudo leer la imagen.'));
+    };
+    image.src = bitmapUrl;
+  });
+}
+
 export async function compressImageFile(
   file: Blob,
-  maxDimension: number = 512,
+  maxDimension: number = 1024,
   quality: number = 0.7,
-): Promise<{dataUrl: string; mimeType: string}> {
-  const bitmapUrl = URL.createObjectURL(file);
-  try {
-    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-      const image = new Image();
-      image.onload = () => resolve(image);
-      image.onerror = () => reject(new Error('No se pudo leer la imagen.'));
-      image.src = bitmapUrl;
-    });
+): Promise<{dataUrl: string; base64: string; mimeType: string}> {
+  let source: CanvasImageSource;
+  let width = 0;
+  let height = 0;
+  let bitmap: ImageBitmap | null = null;
 
-    const scale = Math.min(1, maxDimension / Math.max(img.width, img.height));
-    const targetWidth = Math.max(1, Math.round(img.width * scale));
-    const targetHeight = Math.max(1, Math.round(img.height * scale));
+  if (typeof createImageBitmap === 'function') {
+    try {
+      bitmap = await createImageBitmap(file);
+      source = bitmap;
+      width = bitmap.width;
+      height = bitmap.height;
+    } catch {
+      bitmap = null;
+      const img = await loadImageElement(file);
+      source = img;
+      width = img.width;
+      height = img.height;
+    }
+  } else {
+    const img = await loadImageElement(file);
+    source = img;
+    width = img.width;
+    height = img.height;
+  }
+
+  try {
+    const scale = Math.min(1, maxDimension / Math.max(width, height));
+    const targetWidth = Math.max(1, Math.round(width * scale));
+    const targetHeight = Math.max(1, Math.round(height * scale));
 
     const canvas = document.createElement('canvas');
     canvas.width = targetWidth;
@@ -24,20 +57,21 @@ export async function compressImageFile(
     if (!ctx) {
       throw new Error('No se pudo procesar el lienzo de la imagen.');
     }
-    ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+    ctx.drawImage(source, 0, 0, targetWidth, targetHeight);
 
     const dataUrl = canvas.toDataURL('image/jpeg', quality);
-    return {dataUrl, mimeType: 'image/jpeg'};
+    const base64 = dataUrl.replace(/^data:[^;]+;base64,/i, '');
+    return {dataUrl, base64, mimeType: 'image/jpeg'};
   } finally {
-    URL.revokeObjectURL(bitmapUrl);
+    bitmap?.close();
   }
 }
 
 export function captureVideoFrame(
   video: HTMLVideoElement,
-  maxDimension: number = 512,
+  maxDimension: number = 1024,
   quality: number = 0.7,
-): {dataUrl: string; mimeType: string; isDark: boolean} {
+): {dataUrl: string; base64: string; mimeType: string; isDark: boolean} {
   if (video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
     throw new Error('La cámara aún está enfocando. Intenta de nuevo en un momento.');
   }
@@ -77,5 +111,6 @@ export function captureVideoFrame(
   if (!dataUrl.startsWith('data:image/') || dataUrl.length < 100) {
     throw new Error('La cámara aún está cargando la imagen.');
   }
-  return {dataUrl, mimeType: 'image/jpeg', isDark};
+  const base64 = dataUrl.replace(/^data:[^;]+;base64,/i, '');
+  return {dataUrl, base64, mimeType: 'image/jpeg', isDark};
 }

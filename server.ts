@@ -12,8 +12,11 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
-const GEMINI_MODEL = 'gemini-4-hydrogen';
-const GEMINI_FALLBACK_MODEL = 'gemini-3.1-flash-lite';
+const DEFAULT_GEMINI_MODEL = 'gemini-3.1-flash-lite';
+const ENV_GEMINI_MODEL = (process.env.GEMINI_MODEL || '').trim();
+const GEMINI_MODEL = /^gemini-[a-z0-9._-]+$/i.test(ENV_GEMINI_MODEL)
+  ? ENV_GEMINI_MODEL
+  : DEFAULT_GEMINI_MODEL;
 
 app.use(express.json({limit: '8mb'}));
 
@@ -154,8 +157,15 @@ function checkRateLimit(key: string): boolean {
   return true;
 }
 
+function sanitizeErrorMessage(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  return raw
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, '[REDACTED_KEY]')
+    .replace(/(x-goog-api-key|apiKey|key)[=:]\s*["']?[^\s"'&]+/gi, '$1=[REDACTED]');
+}
+
 function getGeminiClient(): GoogleGenAI | null {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = (process.env.GEMINI_API_KEY || '').trim();
   if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
     return null;
   }
@@ -164,6 +174,7 @@ function getGeminiClient(): GoogleGenAI | null {
     httpOptions: {
       headers: {
         'User-Agent': 'aistudio-build',
+        'x-goog-api-key': apiKey,
       },
     },
   });
@@ -172,15 +183,27 @@ function getGeminiClient(): GoogleGenAI | null {
 function isTimeoutGeminiError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   const name = err instanceof Error ? err.name : '';
-  return name === 'TimeoutError' || name === 'AbortError' || /aborted due to timeout|DEADLINE_EXCEEDED/i.test(msg);
+  return (
+    name === 'TimeoutError' ||
+    name === 'AbortError' ||
+    /aborted due to timeout|DEADLINE_EXCEEDED|timed out/i.test(msg)
+  );
+}
+
+function getAuthGeminiStatus(err: unknown): 401 | 403 | null {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/API_KEY_INVALID|API key not valid|UNAUTHENTICATED|\b401\b/i.test(msg)) {
+    return 401;
+  }
+  if (/PERMISSION_DENIED|\b403\b/i.test(msg)) {
+    return 403;
+  }
+  return null;
 }
 
 function isTransientGeminiError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
-  return (
-    isTimeoutGeminiError(err) ||
-    /500|INTERNAL|503|UNAVAILABLE|504|high demand|ECONNRESET|fetch failed|network/i.test(msg)
-  );
+  return /500|INTERNAL|503|UNAVAILABLE|504|high demand|ECONNRESET|fetch failed|network/i.test(msg);
 }
 
 function isQuotaOrRateError(err: unknown): boolean {
@@ -188,54 +211,26 @@ function isQuotaOrRateError(err: unknown): boolean {
   return /429|RESOURCE_EXHAUSTED/i.test(msg);
 }
 
-async function generateWithResilience(
+const GEMINI_TIMEOUT_MS = 25000;
+
+async function generateWithTimeout(
   ai: GoogleGenAI,
   params: Omit<Parameters<GoogleGenAI['models']['generateContent']>[0], 'model'>,
-  options: {preferFast?: boolean; timeoutMs?: number; singleAttempt?: boolean} = {},
+  timeoutMs: number = GEMINI_TIMEOUT_MS,
 ) {
-  const {preferFast = false, timeoutMs = 10000, singleAttempt = false} = options;
-
-  const attempts: Array<{model: string; delayMs: number; timeoutMs: number}> = singleAttempt
-    ? [{model: GEMINI_MODEL, delayMs: 0, timeoutMs}]
-    : preferFast
-      ? [
-          {model: GEMINI_FALLBACK_MODEL, delayMs: 0, timeoutMs: 11000},
-          {model: GEMINI_MODEL, delayMs: 300, timeoutMs: 12000},
-        ]
-      : [
-          {model: GEMINI_MODEL, delayMs: 0, timeoutMs: 12000},
-          {model: GEMINI_FALLBACK_MODEL, delayMs: 300, timeoutMs: 10000},
-        ];
-
-  let lastError: unknown;
-  for (let i = 0; i < attempts.length; i++) {
-    const attempt = attempts[i];
-    if (attempt.delayMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, attempt.delayMs));
-    }
-    try {
-      const baseConfig = {...(params.config || {})};
-      if (attempt.model === GEMINI_FALLBACK_MODEL) {
-        baseConfig.thinkingConfig = {thinkingLevel: ThinkingLevel.MINIMAL};
-      }
-      const config = {
-        ...baseConfig,
-        abortSignal: AbortSignal.timeout(attempt.timeoutMs),
-      };
-      return await ai.models.generateContent({
-        ...params,
-        model: attempt.model,
-        config,
-      });
-    } catch (err) {
-      lastError = err;
-      const canRetryNext = isTransientGeminiError(err) || isQuotaOrRateError(err);
-      if (!canRetryNext) {
-        throw err;
-      }
-    }
+  const effectiveTimeoutMs = Math.max(1000, Math.min(GEMINI_TIMEOUT_MS, timeoutMs));
+  const baseConfig = {...(params.config || {})};
+  if (GEMINI_MODEL.includes('flash-lite')) {
+    baseConfig.thinkingConfig = {thinkingLevel: ThinkingLevel.MINIMAL};
   }
-  throw lastError;
+  return ai.models.generateContent({
+    ...params,
+    model: GEMINI_MODEL,
+    config: {
+      ...baseConfig,
+      abortSignal: AbortSignal.timeout(effectiveTimeoutMs),
+    },
+  });
 }
 
 const VALID_CATEGORIES = [
@@ -256,15 +251,17 @@ const RecognizeRequestSchema = z.object({
 });
 
 const RecognizeResponseSchema = z.object({
-  name: z.string().min(2).max(80),
-  category: z.enum(VALID_CATEGORIES),
-  color: z.string().min(1).max(30),
-  confidence: z.number().min(1).max(100),
-  isGarment: z.boolean().default(true),
+  nombre: z.string().min(1).max(80).nullable(),
+  marca: z.string().min(1).max(50).nullable(),
+  categoria: z.enum(VALID_CATEGORIES).nullable(),
+  codigo_barras: z.string().min(1).max(64).nullable(),
+  color: z.string().min(1).max(30).nullable(),
 });
 
-function normalizeCategory(raw: string): (typeof VALID_CATEGORIES)[number] {
+function normalizeCategory(raw: unknown): (typeof VALID_CATEGORIES)[number] | null {
+  if (typeof raw !== 'string') return null;
   const value = raw.trim().toLowerCase();
+  if (!value || value === 'null' || value === 'none' || value === 'desconocido') return null;
   if ((VALID_CATEGORIES as readonly string[]).includes(value)) {
     return value as (typeof VALID_CATEGORIES)[number];
   }
@@ -276,6 +273,15 @@ function normalizeCategory(raw: string): (typeof VALID_CATEGORIES)[number] {
   if (/zapato|tenis|zapatilla|bota|sandalia|calzado/.test(value)) return 'zapatos';
   if (/accesorio|bolso|morral|correa|cintur|media|gafa|bufanda|reloj/.test(value)) return 'accesorio';
   return 'otro';
+}
+
+function normalizeNullableString(raw: unknown, maxLen: number): string | null {
+  if (typeof raw !== 'string') return null;
+  const cleaned = raw.trim();
+  if (!cleaned || /^(null|none|n\/a|na|desconocid[oa]|no visible|sin marca)$/i.test(cleaned)) {
+    return null;
+  }
+  return cleaned.slice(0, maxLen);
 }
 
 function extractJsonObject(rawText: string): Record<string, unknown> {
@@ -305,8 +311,10 @@ app.post('/api/recognize', async (req, res) => {
 
   const ai = getGeminiClient();
   if (!ai) {
-    res.status(503).json({
-      error: 'Falta configurar GEMINI_API_KEY en el servidor para usar el reconocimiento con IA.',
+    console.error('[IA /api/recognize] GEMINI_API_KEY no configurada en el servidor');
+    res.status(401).json({
+      code: 'AUTH_ERROR',
+      error: 'Falta configurar una GEMINI_API_KEY válida en el servidor para usar la IA.',
     });
     return;
   }
@@ -314,7 +322,7 @@ app.post('/api/recognize', async (req, res) => {
   try {
     const cleanBase64 = parsed.data.imageBase64.replace(/^data:[^;]+;base64,/i, '');
 
-    const response = await generateWithResilience(
+    const response = await generateWithTimeout(
       ai,
       {
         contents: {
@@ -326,7 +334,7 @@ app.post('/api/recognize', async (req, res) => {
               },
             },
             {
-              text: 'Observa la imagen e identifica qué prenda de vestir, calzado o accesorio aparece. Si hay una prenda visible (aunque la esté usando una persona o esté doblada/colgada), responde con isGarment=true y un nombre corto en español de Colombia (ej. "Camiseta blanca", "Jean azul", "Buzo negro", "Chaqueta denim", "Gorra negra", "Tenis blancos"). Si no hay ninguna prenda ni accesorio de moda visible, responde isGarment=false con name="Sin prenda detectada" y confidence bajo (< 40).',
+              text: 'Observa la imagen. Si ves una prenda de vestir, calzado o accesorio (colgada, doblada o puesta en una persona), responde en JSON con {nombre, marca, categoria, codigo_barras, color}. Si la marca o el código de barras no son claramente legibles, pon null en esos campos. Si la imagen está en blanco, muy oscura, borrosa o NO muestra ningún producto de vestir/moda, devuelve nombre=null, marca=null, categoria=null, codigo_barras=null, color=null. Nunca inventes precios ni cantidades. Para categoria usa solo: camiseta, jean, pantalón, buzo, gorra, zapatos, accesorio, otro.',
             },
           ],
         },
@@ -335,39 +343,45 @@ app.post('/api/recognize', async (req, res) => {
             thinkingLevel: ThinkingLevel.LOW,
           },
           systemInstruction:
-            'Eres un experto en visión por computador para inventario de tiendas de ropa en Colombia. Responde únicamente con JSON válido siguiendo el esquema.',
+            'Eres un clasificador visual de inventario de ropa en Colombia. Responde solo JSON válido con {nombre, marca, categoria, codigo_barras, color}. Identifica la prenda cuando sea visible y usa null en cualquier campo (como marca o codigo_barras) cuando no estés seguro. Si no hay ninguna prenda visible, responde nombre=null.',
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
             properties: {
-              isGarment: {
-                type: Type.BOOLEAN,
-                description:
-                  'true si en la imagen se distingue una prenda, calzado o accesorio de ropa',
-              },
-              name: {
+              nombre: {
                 type: Type.STRING,
-                description: 'Nombre corto y natural de la prenda en español, p. ej. Camiseta blanca',
-              },
-              category: {
-                type: Type.STRING,
+                nullable: true,
                 description:
-                  'Categoría exacta entre: camiseta, jean, pantalón, buzo, gorra, zapatos, accesorio, otro',
+                  'Nombre corto de la prenda o producto en español (ej. "Camiseta blanca"), o null si no se distingue.',
+              },
+              marca: {
+                type: Type.STRING,
+                nullable: true,
+                description: 'Marca visible en etiqueta o logo, o null si no es legible.',
+              },
+              categoria: {
+                type: Type.STRING,
+                nullable: true,
+                description:
+                  'Categoría exacta entre: camiseta, jean, pantalón, buzo, gorra, zapatos, accesorio, otro; o null si no está seguro.',
+              },
+              codigo_barras: {
+                type: Type.STRING,
+                nullable: true,
+                description:
+                  'Número o código de barras claramente visible en la imagen, o null si no es legible.',
               },
               color: {
                 type: Type.STRING,
-                description: 'Color principal de la prenda en español, p. ej. Blanco, Azul, Negro',
-              },
-              confidence: {
-                type: Type.INTEGER,
-                description: 'Nivel de confianza de 1 a 100',
+                nullable: true,
+                description: 'Color principal de la prenda en español, o null si no está seguro.',
               },
             },
-            required: ['isGarment', 'name', 'category', 'color', 'confidence'],
+            required: ['nombre', 'marca', 'categoria', 'codigo_barras'],
           },
         },
       },
-      {preferFast: true, timeoutMs: 10000},
+      GEMINI_TIMEOUT_MS,
     );
 
     const responseText = (response.text || '').trim();
@@ -376,62 +390,47 @@ app.post('/api/recognize', async (req, res) => {
     }
 
     const rawJson = extractJsonObject(responseText);
-    const normalizedCategory = normalizeCategory(String(rawJson.category || 'otro'));
-    const isGarment = rawJson.isGarment !== false;
-    const rawName = typeof rawJson.name === 'string' ? rawJson.name.trim() : '';
-    if (isGarment && !rawName) {
-      throw new Error('La respuesta de Gemini no incluyó el nombre de la prenda');
-    }
-
     const validated = RecognizeResponseSchema.parse({
-      isGarment,
-      name: (rawName || 'Sin prenda detectada').slice(0, 80),
-      category: normalizedCategory,
-      color: String(rawJson.color || 'Neutro').slice(0, 30),
-      confidence: Math.max(1, Math.min(100, Math.round(Number(rawJson.confidence) || 88))),
+      nombre: normalizeNullableString(rawJson.nombre, 80),
+      marca: normalizeNullableString(rawJson.marca, 50),
+      categoria: normalizeCategory(rawJson.categoria),
+      codigo_barras: normalizeNullableString(rawJson.codigo_barras, 64),
+      color: normalizeNullableString(rawJson.color, 30),
     });
 
     res.json(validated);
   } catch (err) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    console.error('Error en /api/recognize:', errMsg);
+    const safeMsg = sanitizeErrorMessage(err);
+    console.error('[IA /api/recognize] Error:', safeMsg);
     if (isQuotaOrRateError(err)) {
       res.status(429).json({
+        code: 'RATE_LIMIT',
         error:
-          'Se alcanzó el límite temporal de consultas a Gemini. Espera unos segundos e intenta de nuevo.',
+          'Se alcanzó el límite temporal de uso de Gemini (429). Espera unos segundos e intenta de nuevo.',
       });
       return;
     }
-    if (/API_KEY_INVALID|API key not valid|PERMISSION_DENIED|403/i.test(errMsg)) {
-      res.status(502).json({
+    const authStatus = getAuthGeminiStatus(err);
+    if (authStatus) {
+      res.status(authStatus).json({
+        code: 'AUTH_ERROR',
         error:
-          'Verifica tu clave GEMINI_API_KEY en Settings > Secrets para activar el reconocimiento con IA.',
+          'La clave GEMINI_API_KEY del servidor no es válida o no tiene permisos. Verifica la configuración en el hosting.',
       });
       return;
     }
     if (isTimeoutGeminiError(err)) {
       res.status(504).json({
+        code: 'TIMEOUT',
         error:
-          'El reconocimiento tardó más de lo esperado. Toca "Reintentar con IA" o toma una foto más cercana.',
+          'Gemini tardó más de 25 segundos en analizar la imagen. Toca "Reintentar con IA" o completa los datos a mano.',
       });
       return;
     }
-    if (/500|INTERNAL/i.test(errMsg)) {
-      res.status(500).json({
-        error: 'El servicio de IA tuvo un fallo interno temporal. Toca "Reintentar con IA".',
-      });
-      return;
-    }
-    if (/503|UNAVAILABLE|504|high demand/i.test(errMsg)) {
-      res.status(503).json({
-        error:
-          'El servicio de Gemini está con alta demanda en este momento. Toca "Reintentar con IA".',
-      });
-      return;
-    }
-    res.status(502).json({
+    res.status(503).json({
+      code: 'SERVER_ERROR',
       error:
-        'No pudimos analizar la imagen con la IA. Toma otra foto más nítida o escríbela manualmente.',
+        'El servicio de Gemini no pudo procesar la imagen en este momento. Toca "Reintentar con IA" o registra a mano.',
     });
   }
 });
@@ -519,8 +518,10 @@ app.post('/api/assistant', async (req, res) => {
 
   const ai = getGeminiClient();
   if (!ai) {
-    res.status(503).json({
-      error: 'Falta configurar GEMINI_API_KEY en Settings > Secrets para usar el Asistente IA.',
+    console.error('[IA /api/assistant] GEMINI_API_KEY no configurada en el servidor');
+    res.status(401).json({
+      code: 'AUTH_ERROR',
+      error: 'Falta configurar una GEMINI_API_KEY válida en el servidor para usar el Asistente IA.',
     });
     return;
   }
@@ -562,6 +563,7 @@ app.post('/api/assistant', async (req, res) => {
     }));
 
     const wantsSearch = shouldEnableWebSearch(question, useWebSearch);
+    const requestDeadline = Date.now() + GEMINI_TIMEOUT_MS;
 
     if (wantsSearch) {
       try {
@@ -577,7 +579,7 @@ app.post('/api/assistant', async (req, res) => {
           },
         ];
 
-        const searchResponse = await generateWithResilience(
+        const searchResponse = await generateWithTimeout(
           ai,
           {
             contents: searchContents,
@@ -590,7 +592,7 @@ app.post('/api/assistant', async (req, res) => {
                 'Asistente de "Inventario Fácil IA" en Colombia. Responde con datos reales de Google Search y del inventario entregado en máximo 4 frases claras en español colombiano. No inventes existencias.',
             },
           },
-          {preferFast: false, timeoutMs: 8500, singleAttempt: true},
+          10000,
         );
 
         const rawChunks =
@@ -621,9 +623,13 @@ app.post('/api/assistant', async (req, res) => {
           return;
         }
       } catch (searchErr) {
+        const authStatus = getAuthGeminiStatus(searchErr);
+        if (authStatus) {
+          throw searchErr;
+        }
         console.warn(
-          'Search grounding omitido, continuando con chat Gemini:',
-          searchErr instanceof Error ? searchErr.message : String(searchErr),
+          '[IA /api/assistant] Search grounding omitido, continuando con chat Gemini:',
+          sanitizeErrorMessage(searchErr),
         );
       }
     }
@@ -640,7 +646,11 @@ app.post('/api/assistant', async (req, res) => {
       },
     ];
 
-    const response = await generateWithResilience(
+    const remainingTimeoutMs = requestDeadline - Date.now();
+    if (remainingTimeoutMs < 3000) {
+      throw new DOMException('Request deadline exceeded', 'TimeoutError');
+    }
+    const response = await generateWithTimeout(
       ai,
       {
         contents: chatContents,
@@ -672,7 +682,7 @@ app.post('/api/assistant', async (req, res) => {
           },
         },
       },
-      {preferFast: false, timeoutMs: 10000},
+      remainingTimeoutMs,
     );
 
     const raw = extractJsonObject(response.text ?? '{}') as {
@@ -714,35 +724,36 @@ app.post('/api/assistant', async (req, res) => {
       source: 'gemini',
     });
   } catch (err) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    console.error('Error en /api/assistant:', errMsg);
+    const safeMsg = sanitizeErrorMessage(err);
+    console.error('[IA /api/assistant] Error:', safeMsg);
     if (isQuotaOrRateError(err)) {
       res.status(429).json({
+        code: 'RATE_LIMIT',
         error:
-          'Se alcanzó el límite temporal de consultas a Gemini. Espera unos segundos e intenta de nuevo.',
+          'Se alcanzó el límite temporal de uso de Gemini (429). Espera unos segundos y toca "Reintentar".',
       });
       return;
     }
-    if (/API_KEY_INVALID|API key not valid|PERMISSION_DENIED|403/i.test(errMsg)) {
-      res.status(502).json({
-        error: 'Verifica tu clave GEMINI_API_KEY en Settings > Secrets para activar el Asistente IA.',
+    const authStatus = getAuthGeminiStatus(err);
+    if (authStatus) {
+      res.status(authStatus).json({
+        code: 'AUTH_ERROR',
+        error:
+          'La clave GEMINI_API_KEY del servidor no es válida o no tiene permisos. Verifica la configuración en el hosting.',
       });
       return;
     }
     if (isTimeoutGeminiError(err)) {
       res.status(504).json({
-        error: 'La IA se demoró más de lo esperado en responder. Toca "Reintentar" para consultarla de nuevo.',
-      });
-      return;
-    }
-    if (/500|INTERNAL/i.test(errMsg)) {
-      res.status(500).json({
-        error: 'El servicio de Gemini tuvo un error interno temporal. Toca "Reintentar".',
+        code: 'TIMEOUT',
+        error:
+          'Gemini tardó más de 25 segundos en responder. Toca "Reintentar" para consultarlo de nuevo.',
       });
       return;
     }
     res.status(503).json({
-      error: 'Gemini está ocupado en este momento. Toca "Reintentar" en unos segundos.',
+      code: 'SERVER_ERROR',
+      error: 'El servicio de Gemini está temporalmente ocupado. Toca "Reintentar" en unos segundos.',
     });
   }
 });

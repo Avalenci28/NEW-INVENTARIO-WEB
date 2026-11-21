@@ -21,10 +21,11 @@ import {captureVideoFrame, compressImageFile} from '../lib/imageUtils';
 import type {GarmentCategory, Product} from '../types/inventory';
 
 interface RecognizedResult {
-  name: string;
-  category: GarmentCategory;
-  color: string;
-  confidence: number;
+  nombre: string;
+  marca: string | null;
+  categoria: GarmentCategory;
+  codigo_barras: string | null;
+  color: string | null;
   imageUrl: string;
 }
 
@@ -46,11 +47,20 @@ export const ScanPage: React.FC = () => {
   const [autoScanEnabled, setAutoScanEnabled] = useState(true);
   const [detected, setDetected] = useState<RecognizedResult | null>(null);
   const [noGarmentHint, setNoGarmentHint] = useState(false);
+  const [partialDetected, setPartialDetected] = useState<{
+    marca?: string | null;
+    categoria?: GarmentCategory | null;
+    codigo_barras?: string | null;
+    color?: string | null;
+  } | null>(null);
   const [aiError, setAiError] = useState<string | null>(null);
-  const [lastCaptured, setLastCaptured] = useState<{dataUrl: string; mimeType: string} | null>(
-    null,
-  );
+  const [lastCaptured, setLastCaptured] = useState<{
+    dataUrl: string;
+    base64: string;
+    mimeType: string;
+  } | null>(null);
   const [matchedProduct, setMatchedProduct] = useState<Product | null>(null);
+  const [barcodeNotFound, setBarcodeNotFound] = useState<string | null>(null);
   const [manualBarcodeOpen, setManualBarcodeOpen] = useState(false);
   const [manualBarcode, setManualBarcode] = useState('');
 
@@ -59,6 +69,7 @@ export const ScanPage: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const autoScanRanRef = useRef(false);
   const inFlightRef = useRef(false);
+  const barcodeHandledRef = useRef(false);
 
   const stopCamera = useCallback(() => {
     if (streamRef.current) {
@@ -126,10 +137,17 @@ export const ScanPage: React.FC = () => {
             setTorchSupported(true);
           }
         }
-      } catch {
-        setCameraError(
-          'No pudimos abrir la cámara (permiso denegado o sin cámara). Selecciona una foto de tu galería.',
-        );
+      } catch (err) {
+        const errName = err instanceof Error ? err.name : '';
+        if (errName === 'NotAllowedError' || errName === 'PermissionDeniedError') {
+          setCameraError(
+            'Permiso de cámara denegado. Actívalo en los ajustes de Safari o selecciona una foto de tu galería.',
+          );
+        } else {
+          setCameraError(
+            'No pudimos abrir la cámara en este dispositivo. Selecciona una foto de tu galería.',
+          );
+        }
       }
     }
 
@@ -156,22 +174,23 @@ export const ScanPage: React.FC = () => {
   const handleBarcodeFound = useCallback(
     (code: string) => {
       const clean = code.trim();
-      if (!clean) return;
-      const existing = products.find((p) => p.barcode && p.barcode === clean);
+      if (!clean || barcodeHandledRef.current) return;
+      barcodeHandledRef.current = true;
+      const existing = products.find((p) => p.barcode && p.barcode.trim() === clean);
       if (existing) {
+        setBarcodeNotFound(null);
         showToast(`Código encontrado: ${existing.name}`);
         setMatchedProduct(existing);
       } else {
-        stopCamera();
-        navigate(`/prendas/nueva?barcode=${encodeURIComponent(clean)}`);
+        setBarcodeNotFound(clean);
       }
     },
-    [products, showToast, stopCamera, navigate],
+    [products, showToast],
   );
 
   // Escaneo continuo de código de barras en modo barcode
   useEffect(() => {
-    if (mode !== 'barcode' || !cameraReady || matchedProduct) return;
+    if (mode !== 'barcode' || !cameraReady || matchedProduct || barcodeNotFound) return;
     const video = videoRef.current;
     if (!video) return;
 
@@ -239,150 +258,163 @@ export const ScanPage: React.FC = () => {
       active = false;
       controls?.stop();
     };
-  }, [mode, cameraReady, matchedProduct, handleBarcodeFound]);
+  }, [mode, cameraReady, matchedProduct, barcodeNotFound, handleBarcodeFound]);
 
-  const postRecognizeWithRetry = useCallback(
+  const postRecognize = useCallback(
     async (
-      dataUrl: string,
+      base64: string,
       mimeType: string,
     ): Promise<{
       ok: boolean;
       status?: number;
       error?: string;
       data?: {
-        isGarment?: boolean;
-        name?: string;
-        category?: GarmentCategory;
-        color?: string;
-        confidence?: number;
+        nombre?: string | null;
+        marca?: string | null;
+        categoria?: GarmentCategory | null;
+        codigo_barras?: string | null;
+        color?: string | null;
+        code?: string;
         error?: string;
       };
     }> => {
       const payload = JSON.stringify({
-        imageBase64: dataUrl,
+        imageBase64: base64.replace(/^data:[^;]+;base64,/i, ''),
         mimeType,
         userId: user?.uid,
       });
 
-      let lastErr: unknown;
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const controller = new AbortController();
-        const timeoutId = window.setTimeout(() => controller.abort(), 30000);
-        try {
-          const res = await fetch('/api/recognize', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: payload,
-            cache: 'no-store',
-            credentials: 'same-origin',
-            signal: controller.signal,
-          });
-          window.clearTimeout(timeoutId);
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 35000);
 
-          const rawText = await res.text();
-          let parsedData: {
-            isGarment?: boolean;
-            name?: string;
-            category?: GarmentCategory;
-            color?: string;
-            confidence?: number;
-            error?: string;
-          } | null = null;
+      try {
+        const res = await fetch('/api/recognize', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: payload,
+          cache: 'no-store',
+          credentials: 'same-origin',
+          signal: controller.signal,
+        });
+        window.clearTimeout(timeoutId);
 
-          if (rawText) {
-            try {
-              parsedData = JSON.parse(rawText) as NonNullable<typeof parsedData>;
-            } catch {
-              parsedData = null;
-            }
+        type RecognizeApiPayload = {
+          nombre?: string | null;
+          marca?: string | null;
+          categoria?: GarmentCategory | null;
+          codigo_barras?: string | null;
+          color?: string | null;
+          code?: string;
+          error?: string;
+        };
+
+        const rawText = await res.text();
+        const parsePayload = (raw: string): RecognizeApiPayload | null => {
+          if (!raw) return null;
+          try {
+            return JSON.parse(raw) as RecognizeApiPayload;
+          } catch {
+            return null;
           }
+        };
+        const parsedData = parsePayload(rawText);
 
-          if (!parsedData) {
-            if (res.status === 502 && attempt === 0) {
-              await new Promise((r) => window.setTimeout(r, 350));
-              continue;
-            }
-            if (res.status === 413) {
-              return {
-                ok: false,
-                error: 'La foto es muy pesada. Acércate un poco más o intenta con otra foto.',
-              };
-            }
-            if (res.status === 429) {
-              return {
-                ok: false,
-                error:
-                  'Se alcanzó el límite temporal de consultas a Gemini. Espera unos segundos e intenta de nuevo.',
-              };
-            }
-            if (res.status === 500 || res.status === 503) {
-              return {
-                ok: false,
-                error: 'El servicio de IA está temporalmente ocupado. Toca "Reintentar con IA".',
-              };
-            }
-            if (res.status === 401 || res.status === 403 || res.redirected) {
-              return {
-                ok: false,
-                error: 'Tu sesión expiró. Recarga la página o vuelve a iniciar sesión.',
-              };
-            }
+        if (!res.ok) {
+          const serverMsg = parsedData?.error;
+          if (res.status === 504 || parsedData?.code === 'TIMEOUT') {
             return {
               ok: false,
-              error: 'El servidor de IA tardó en responder. Toca "Reintentar con IA".',
+              status: res.status,
+              error:
+                serverMsg ||
+                'La IA tardó más de lo esperado en analizar la foto. Toca "Reintentar con IA" o registra a mano.',
             };
           }
-
-          return {ok: res.ok, status: res.status, data: parsedData};
-        } catch (err) {
-          window.clearTimeout(timeoutId);
-          lastErr = err;
-          const isAbort = err instanceof Error && err.name === 'AbortError';
-          if (!isAbort && attempt === 0) {
-            await new Promise((r) => window.setTimeout(r, 350));
-            continue;
+          if (res.status === 429 || parsedData?.code === 'RATE_LIMIT') {
+            return {
+              ok: false,
+              status: res.status,
+              error:
+                serverMsg ||
+                'Se alcanzó el límite temporal de consultas a Gemini (429). Espera unos segundos y reintenta.',
+            };
           }
-          break;
+          if (res.status === 401 || res.status === 403 || parsedData?.code === 'AUTH_ERROR') {
+            return {
+              ok: false,
+              status: res.status,
+              error:
+                serverMsg ||
+                'Error de permisos o clave de IA en el servidor (401/403). Revisa la configuración del hosting.',
+            };
+          }
+          if (res.status === 413) {
+            return {
+              ok: false,
+              status: res.status,
+              error: 'La foto es muy pesada. Acércate un poco más o intenta con otra foto.',
+            };
+          }
+          return {
+            ok: false,
+            status: res.status,
+            error:
+              serverMsg ||
+              'Error del servidor de IA (5xx). Toca "Reintentar con IA" o registra los datos a mano.',
+          };
         }
-      }
 
-      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        if (!parsedData) {
+          return {
+            ok: false,
+            status: res.status,
+            error: 'El servidor devolvió una respuesta inesperada. Toca "Reintentar con IA".',
+          };
+        }
+
+        return {ok: true, status: res.status, data: parsedData};
+      } catch (err) {
+        window.clearTimeout(timeoutId);
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+          return {
+            ok: false,
+            error: 'Sin conexión a internet. Verifica tu Wi-Fi o datos móviles e intenta de nuevo.',
+          };
+        }
+        if (err instanceof Error && err.name === 'AbortError') {
+          return {
+            ok: false,
+            error:
+              'La conexión tardó demasiado en responder. Toca "Reintentar con IA" o registra a mano.',
+          };
+        }
         return {
           ok: false,
-          error: 'Sin conexión a internet. Verifica tu Wi-Fi o datos móviles e intenta de nuevo.',
+          error: 'No pudimos conectar con el servicio de IA. Toca "Reintentar con IA" o registra a mano.',
         };
       }
-      if (lastErr instanceof Error && lastErr.name === 'AbortError') {
-        return {
-          ok: false,
-          error: 'El análisis tardó demasiado. Toca "Reintentar con IA" o elige una foto más nítida.',
-        };
-      }
-      return {
-        ok: false,
-        error: 'No pudimos conectar con el servicio de IA. Toca "Reintentar con IA" o registra a mano.',
-      };
     },
     [user?.uid],
   );
 
   const recognizeImage = useCallback(
-    async (dataUrl: string, mimeType: string, isAuto: boolean = false) => {
+    async (dataUrl: string, base64: string, mimeType: string, isAuto: boolean = false) => {
       if (inFlightRef.current) return;
       inFlightRef.current = true;
       setAnalyzing(true);
       setAiError(null);
       setNoGarmentHint(false);
-      setLastCaptured({dataUrl, mimeType});
+      setPartialDetected(null);
+      setLastCaptured({dataUrl, base64, mimeType});
 
       try {
-        const result = await postRecognizeWithRetry(dataUrl, mimeType);
+        const result = await postRecognize(base64, mimeType);
         const data = result.data;
 
-        if (!result.ok || !data || !data.name) {
+        if (!result.ok || !data) {
           const msg =
-            data?.error ||
             result.error ||
+            data?.error ||
             'No pudimos reconocer la prenda en este momento. Intenta tomar otra foto.';
           setAiError(msg);
           if (!isAuto) {
@@ -391,20 +423,30 @@ export const ScanPage: React.FC = () => {
           return;
         }
 
-        if (data.isGarment === false) {
+        if (!data.nombre) {
           setDetected(null);
           setNoGarmentHint(true);
+          setPartialDetected({
+            marca: data.marca || null,
+            categoria: data.categoria || null,
+            codigo_barras: data.codigo_barras || null,
+            color: data.color || null,
+          });
           if (!isAuto) {
-            showToast('No distinguimos una prenda clara. Acércala al marco e intenta de nuevo.', 'info');
+            showToast(
+              'No identificamos el producto con certeza. Puedes reintentar o registrar a mano.',
+              'info',
+            );
           }
           return;
         }
 
         setDetected({
-          name: data.name,
-          category: data.category || 'otro',
-          color: data.color || 'Neutro',
-          confidence: data.confidence || 90,
+          nombre: data.nombre,
+          marca: data.marca || null,
+          categoria: data.categoria || 'otro',
+          codigo_barras: data.codigo_barras || null,
+          color: data.color || null,
           imageUrl: dataUrl,
         });
       } catch {
@@ -418,7 +460,7 @@ export const ScanPage: React.FC = () => {
         setAnalyzing(false);
       }
     },
-    [postRecognizeWithRetry, showToast],
+    [postRecognize, showToast],
   );
 
   // Reconocimiento automático inicial cuando la cámara enfoca una prenda
@@ -439,13 +481,13 @@ export const ScanPage: React.FC = () => {
       const video = videoRef.current;
       if (!video || autoScanRanRef.current || inFlightRef.current) return;
       try {
-        const {dataUrl, mimeType, isDark} = captureVideoFrame(video, 512, 0.7);
+        const {dataUrl, base64, mimeType, isDark} = captureVideoFrame(video, 1024, 0.7);
         if (isDark) {
           // Si el sensor de iPhone aún estaba oscuro al iniciar, no gastar petición
           return;
         }
         autoScanRanRef.current = true;
-        void recognizeImage(dataUrl, mimeType, true);
+        void recognizeImage(dataUrl, base64, mimeType, true);
       } catch {
         // Si el primer frame aún no estaba listo, el usuario puede tocar el botón
       }
@@ -467,8 +509,8 @@ export const ScanPage: React.FC = () => {
     }
     try {
       setDetected(null);
-      const {dataUrl, mimeType} = captureVideoFrame(video, 512, 0.7);
-      await recognizeImage(dataUrl, mimeType, false);
+      const {dataUrl, base64, mimeType} = captureVideoFrame(video, 1024, 0.7);
+      await recognizeImage(dataUrl, base64, mimeType, false);
     } catch {
       showToast('No se pudo capturar la foto. Intenta desde la galería.', 'error');
     }
@@ -480,8 +522,8 @@ export const ScanPage: React.FC = () => {
     if (!file || inFlightRef.current || analyzing) return;
     try {
       setDetected(null);
-      const {dataUrl, mimeType} = await compressImageFile(file, 512, 0.7);
-      await recognizeImage(dataUrl, mimeType, false);
+      const {dataUrl, base64, mimeType} = await compressImageFile(file, 1024, 0.7);
+      await recognizeImage(dataUrl, base64, mimeType, false);
     } catch {
       showToast('No pudimos leer esa imagen.', 'error');
     }
@@ -492,9 +534,11 @@ export const ScanPage: React.FC = () => {
     stopCamera();
     navigate('/prendas/nueva', {
       state: {
-        name: detected.name,
-        category: detected.category,
-        color: detected.color,
+        name: detected.nombre,
+        brand: detected.marca || '',
+        category: detected.categoria,
+        barcode: detected.codigo_barras || '',
+        color: detected.color || 'Neutro',
         imageUrl: detected.imageUrl,
         aiRecognized: true,
       },
@@ -505,6 +549,11 @@ export const ScanPage: React.FC = () => {
     stopCamera();
     navigate('/prendas/nueva', {
       state: {
+        name: '',
+        brand: partialDetected?.marca || '',
+        category: partialDetected?.categoria || undefined,
+        barcode: partialDetected?.codigo_barras || '',
+        color: partialDetected?.color || '',
         imageUrl: lastCaptured?.dataUrl || '',
         aiRecognized: false,
       },
@@ -579,16 +628,14 @@ export const ScanPage: React.FC = () => {
           {detected && mode === 'garment' && (
             <div className="mb-3 inline-flex items-center gap-1.5 rounded-full bg-[#24B570] px-3.5 py-1 text-xs font-bold text-white shadow-lg">
               <Sparkles className="h-3.5 w-3.5" />
-              <span>
-                {detected.name.split(' ')[0]} · {detected.confidence} %
-              </span>
+              <span>{detected.nombre}</span>
             </div>
           )}
 
           {noGarmentHint && !detected && !analyzing && mode === 'garment' && (
             <div className="mb-3 inline-flex items-center gap-1.5 rounded-full bg-[#0A1F32]/90 px-3.5 py-1.5 text-xs font-semibold text-white ring-1 ring-white/20">
               <Sparkles className="h-3.5 w-3.5 text-[#EF8D2A]" />
-              <span>Enfoca la prenda en el marco y toca el botón</span>
+              <span>No identificamos el producto · Puedes registrar a mano</span>
             </div>
           )}
 
@@ -642,15 +689,24 @@ export const ScanPage: React.FC = () => {
 
         {/* Panel inferior + Controles */}
         <div className="relative z-10 px-4 pb-[calc(22px+env(safe-area-inset-bottom,0px))]">
-          {aiError && !analyzing && mode === 'garment' && (
+          {(aiError || noGarmentHint) && !analyzing && !detected && mode === 'garment' && (
             <div className="mb-4 rounded-[18px] border border-[#EF8D2A]/40 bg-[#0A1F32]/95 p-4 text-white shadow-xl backdrop-blur-md">
-              <p className="text-xs font-semibold leading-relaxed text-amber-200">{aiError}</p>
+              <p className="text-xs font-semibold leading-relaxed text-amber-200">
+                {aiError ||
+                  'No identificamos el producto con certeza. Enfoca mejor o toca "Registrar a mano" para completar los datos.'}
+              </p>
               <div className="mt-3 flex gap-2">
                 {lastCaptured && (
                   <button
                     type="button"
                     disabled={analyzing}
-                    onClick={() => void recognizeImage(lastCaptured.dataUrl, lastCaptured.mimeType)}
+                    onClick={() =>
+                      void recognizeImage(
+                        lastCaptured.dataUrl,
+                        lastCaptured.base64,
+                        lastCaptured.mimeType,
+                      )
+                    }
                     className="flex min-h-[42px] flex-1 items-center justify-center gap-1.5 rounded-[12px] bg-[#1F69FC] px-3 text-xs font-bold text-white disabled:opacity-50"
                   >
                     <RefreshCw className="h-3.5 w-3.5" />
@@ -668,15 +724,56 @@ export const ScanPage: React.FC = () => {
             </div>
           )}
 
+          {barcodeNotFound && mode === 'barcode' && (
+            <div className="mb-4 flex items-center justify-between gap-3 rounded-[18px] bg-white p-4 text-[#071C2D] shadow-xl">
+              <div className="min-w-0">
+                <p className="text-[10px] font-extrabold tracking-wider text-[#EF8D2A] uppercase">
+                  Código no encontrado
+                </p>
+                <p className="truncate text-base font-extrabold text-[#071C2D] tabular-nums">
+                  {barcodeNotFound}
+                </p>
+                <p className="truncate text-xs text-[#5C7B98]">
+                  No existe en tu inventario. ¿Deseas registrarlo?
+                </p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    barcodeHandledRef.current = false;
+                    setBarcodeNotFound(null);
+                  }}
+                  className="min-h-[44px] rounded-[12px] border border-slate-200 px-3 text-xs font-bold text-[#5C7B98] active:scale-95"
+                >
+                  Otro
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const code = barcodeNotFound;
+                    stopCamera();
+                    navigate(`/prendas/nueva?barcode=${encodeURIComponent(code)}`);
+                  }}
+                  className="min-h-[44px] rounded-[12px] bg-[#1F69FC] px-4 text-sm font-bold text-white shadow-sm active:scale-95"
+                >
+                  Registrar
+                </button>
+              </div>
+            </div>
+          )}
+
           {detected && mode === 'garment' && (
             <div className="mb-4 flex items-center justify-between gap-3 rounded-[18px] bg-white p-4 text-[#071C2D] shadow-xl">
               <div className="min-w-0">
                 <p className="text-[10px] font-extrabold tracking-wider text-[#24B570] uppercase">
                   La IA detectó
                 </p>
-                <p className="truncate text-base font-extrabold text-[#071C2D]">{detected.name}</p>
-                <p className="text-xs capitalize text-[#5C7B98]">
-                  {detected.category} · {detected.color}
+                <p className="truncate text-base font-extrabold text-[#071C2D]">{detected.nombre}</p>
+                <p className="truncate text-xs capitalize text-[#5C7B98]">
+                  {detected.categoria}
+                  {detected.marca ? ` · ${detected.marca}` : ''}
+                  {detected.codigo_barras ? ` · ${detected.codigo_barras}` : ''}
                 </p>
               </div>
               <div className="flex shrink-0 items-center gap-2">
@@ -685,6 +782,7 @@ export const ScanPage: React.FC = () => {
                   onClick={() => {
                     setDetected(null);
                     setAiError(null);
+                    setNoGarmentHint(false);
                   }}
                   className="min-h-[44px] rounded-[12px] border border-slate-200 px-3 text-xs font-bold text-[#5C7B98] active:scale-95"
                 >
@@ -737,6 +835,8 @@ export const ScanPage: React.FC = () => {
               aria-label="Cambiar a escáner de código de barras"
               disabled={analyzing}
               onClick={() => {
+                barcodeHandledRef.current = false;
+                setBarcodeNotFound(null);
                 setDetected(null);
                 setAiError(null);
                 setNoGarmentHint(false);
@@ -802,7 +902,10 @@ export const ScanPage: React.FC = () => {
 
       <ProductDetailSheet
         product={matchedProduct}
-        onClose={() => setMatchedProduct(null)}
+        onClose={() => {
+          barcodeHandledRef.current = false;
+          setMatchedProduct(null);
+        }}
       />
     </MobileShell>
   );

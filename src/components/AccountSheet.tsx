@@ -5,6 +5,7 @@ import {BellRing, Database, Download, LogOut, Share, ShieldCheck, Store, X} from
 import {useAuth} from '../context/AuthContext';
 import {useInventory} from '../context/InventoryContext';
 import {useToast} from '../context/ToastContext';
+import {formatInventoryError} from '../lib/firebase';
 import {usePWAInstall} from '../hooks/usePWAInstall';
 import {NotificationSettingsSheet} from './NotificationSettingsSheet';
 
@@ -51,7 +52,7 @@ export const AccountSheet: React.FC<AccountSheetProps> = ({open, onClose}) => {
       showToast('Datos de ejemplo cargados en tu inventario.');
       onClose();
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'No se pudieron cargar los datos.', 'error');
+      showToast(formatInventoryError(err, 'No se pudieron cargar los datos.'), 'error');
     } finally {
       setSeeding(false);
     }

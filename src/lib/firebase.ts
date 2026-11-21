@@ -61,6 +61,36 @@ export function handleFirestoreError(
   throw new Error(JSON.stringify(errInfo));
 }
 
+export function formatInventoryError(error: unknown, fallback: string): string {
+  const rawMessage = error instanceof Error ? error.message : String(error || '');
+  let innerMessage = rawMessage;
+
+  try {
+    const parsed = JSON.parse(rawMessage) as {error?: string};
+    if (parsed && typeof parsed.error === 'string' && parsed.error.trim()) {
+      innerMessage = parsed.error;
+    }
+  } catch {
+    // No es JSON de FirestoreErrorInfo; usar texto directo
+  }
+
+  const lower = innerMessage.toLowerCase();
+  if (lower.includes('the client is offline') || lower.includes('network') || lower.includes('failed to fetch')) {
+    return 'Sin conexión con Firebase. Verifica tu internet e intenta de nuevo.';
+  }
+  if (lower.includes('unavailable') || lower.includes('deadline-exceeded')) {
+    return 'No pudimos conectar con Firebase en este momento. Intenta de nuevo en unos segundos.';
+  }
+  if (lower.includes('missing or insufficient permissions') || lower.includes('permission-denied')) {
+    return 'No tienes permisos en Firestore para guardar este cambio. Inicia sesión de nuevo.';
+  }
+  if (lower.includes('resource-exhausted') || lower.includes('quota')) {
+    return 'Se alcanzó el límite temporal de consultas en Firestore. Intenta en unos segundos.';
+  }
+
+  return innerMessage.trim() || fallback;
+}
+
 async function testConnection() {
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));

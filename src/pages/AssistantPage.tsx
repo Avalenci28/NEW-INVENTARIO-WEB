@@ -154,76 +154,75 @@ export const AssistantPage: React.FC = () => {
           items?: AssistantSuggestedItem[];
           askToCreateOrder?: boolean;
           sources?: GroundingSource[];
+          code?: string;
           error?: string;
         };
 
         let data: AssistantApiPayload | null = null;
         let failed = false;
 
-        for (let attempt = 0; attempt < 2; attempt++) {
-          const controller = new AbortController();
-          const timeoutId = window.setTimeout(() => controller.abort(), 35000);
-          try {
-            const res = await fetch('/api/assistant', {
-              method: 'POST',
-              headers: {'Content-Type': 'application/json'},
-              cache: 'no-store',
-              credentials: 'same-origin',
-              signal: controller.signal,
-              body: bodyPayload,
-            });
-            window.clearTimeout(timeoutId);
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), 35000);
+        try {
+          const res = await fetch('/api/assistant', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            cache: 'no-store',
+            credentials: 'same-origin',
+            signal: controller.signal,
+            body: bodyPayload,
+          });
+          window.clearTimeout(timeoutId);
 
-            const rawText = await res.text();
-            let parsed: AssistantApiPayload | null = null;
-            if (rawText) {
-              try {
-                parsed = JSON.parse(rawText) as AssistantApiPayload;
-              } catch {
-                parsed = null;
-              }
+          const rawText = await res.text();
+          let parsed: AssistantApiPayload | null = null;
+          if (rawText) {
+            try {
+              parsed = JSON.parse(rawText) as AssistantApiPayload;
+            } catch {
+              parsed = null;
             }
-
-            if (!parsed) {
-              if (res.status === 502 && attempt === 0) {
-                await new Promise((r) => window.setTimeout(r, 350));
-                continue;
-              }
-              failed = true;
-              data = {
-                error:
-                  res.status === 429
-                    ? 'Se alcanzó el límite temporal de consultas. Espera unos segundos y toca "Reintentar".'
-                    : res.status === 504
-                      ? 'La IA se demoró más de lo esperado en responder. Toca "Reintentar".'
-                      : 'El servicio de IA está temporalmente ocupado. Toca "Reintentar".',
-              };
-              break;
-            }
-
-            if (!res.ok || !parsed.text) {
-              failed = true;
-              data = {
-                error:
-                  parsed.error ||
-                  (res.status === 429
-                    ? 'Se alcanzó el límite temporal de consultas a Gemini. Espera unos segundos y reintenta.'
-                    : 'No pudimos obtener respuesta de Gemini. Toca "Reintentar".'),
-              };
-              break;
-            }
-
-            data = parsed;
-            break;
-          } catch (err) {
-            window.clearTimeout(timeoutId);
-            const isAbort = err instanceof Error && err.name === 'AbortError';
-            if (!isAbort && attempt === 0) {
-              await new Promise((r) => window.setTimeout(r, 350));
-              continue;
-            }
-            throw err;
           }
+
+          if (!res.ok) {
+            failed = true;
+            const serverErr = parsed?.error;
+            if (res.status === 504 || parsed?.code === 'TIMEOUT') {
+              data = {
+                error:
+                  serverErr ||
+                  'Gemini tardó más de lo esperado en responder. Toca "Reintentar".',
+              };
+            } else if (res.status === 429 || parsed?.code === 'RATE_LIMIT') {
+              data = {
+                error:
+                  serverErr ||
+                  'Se alcanzó el límite temporal de uso de Gemini (429). Espera unos segundos y toca "Reintentar".',
+              };
+            } else if (res.status === 401 || res.status === 403 || parsed?.code === 'AUTH_ERROR') {
+              data = {
+                error:
+                  serverErr ||
+                  'Error de autorización o clave de IA en el servidor (401/403). Verifica la configuración del hosting.',
+              };
+            } else {
+              data = {
+                error:
+                  serverErr ||
+                  'El servidor de IA tuvo un problema temporal (5xx). Toca "Reintentar".',
+              };
+            }
+          } else if (!parsed || !parsed.text) {
+            failed = true;
+            data = {
+              error: parsed?.error || 'No pudimos obtener respuesta de Gemini. Toca "Reintentar".',
+            };
+          } else {
+            data = parsed;
+          }
+        } catch (err) {
+          window.clearTimeout(timeoutId);
+          throw err;
         }
 
         const replyMsg: ChatMessage = {

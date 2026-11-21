@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import {useInventory} from '../context/InventoryContext';
 import {useToast} from '../context/ToastContext';
+import {formatInventoryError} from '../lib/firebase';
 import {computeAutoMinStock} from '../lib/inventoryAnalytics';
 import type {Product} from '../types/inventory';
 import {GarmentThumbnail} from './GarmentThumbnail';
@@ -75,7 +76,7 @@ export const ProductDetailSheet: React.FC<ProductDetailSheetProps> = ({product, 
       onClose();
     } catch (err) {
       showToast(
-        err instanceof Error ? err.message : 'No se pudo registrar el movimiento.',
+        formatInventoryError(err, 'No se pudo registrar el movimiento.'),
         'error',
       );
     } finally {
@@ -103,7 +104,7 @@ export const ProductDetailSheet: React.FC<ProductDetailSheetProps> = ({product, 
       showToast('Prenda actualizada.');
       onClose();
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'No se pudo actualizar.', 'error');
+      showToast(formatInventoryError(err, 'No se pudo actualizar.'), 'error');
     } finally {
       setBusy(false);
     }
@@ -121,7 +122,7 @@ export const ProductDetailSheet: React.FC<ProductDetailSheetProps> = ({product, 
       showToast('Prenda eliminada del inventario.');
       onClose();
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'No se pudo eliminar.', 'error');
+      showToast(formatInventoryError(err, 'No se pudo eliminar.'), 'error');
     } finally {
       setBusy(false);
     }
