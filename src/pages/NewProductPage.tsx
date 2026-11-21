@@ -48,7 +48,15 @@ export const NewProductPage: React.FC = () => {
   const [imageUrl] = useState(state.imageUrl || '');
   const [aiRecognized] = useState(Boolean(state.aiRecognized));
 
-  const [size, setSize] = useState('M');
+  const initialSize =
+    state.category === 'jean' || state.category === 'pantalón'
+      ? '32'
+      : state.category === 'zapatos'
+        ? '38'
+        : state.category === 'gorra' || state.category === 'accesorio'
+          ? 'Única'
+          : 'M';
+  const [size, setSize] = useState(initialSize);
   const [quantity, setQuantity] = useState(12);
   const [spaceId, setSpaceId] = useState(defaultSpaceId);
   const [autoMinStock, setAutoMinStock] = useState(false);

@@ -4,7 +4,7 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import {fileURLToPath} from 'url';
-import {GoogleGenAI, Type} from '@google/genai';
+import {GoogleGenAI, ThinkingLevel, Type} from '@google/genai';
 import {z} from 'zod';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -12,7 +12,8 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-4-hydrogen';
+const GEMINI_MODEL = 'gemini-4-hydrogen';
+const GEMINI_FALLBACK_MODEL = 'gemini-3.1-flash-lite';
 
 app.use(express.json({limit: '8mb'}));
 
@@ -132,10 +133,10 @@ app.get('/api/demo-session', (req, res) => {
   });
 });
 
-// Rate limiter en memoria: 30 reconocimientos por hora por usuario/IP
+// Rate limiter en memoria: 60 reconocimientos por hora por usuario/IP
 const recognizeRateMap = new Map<string, number[]>();
 const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
-const RATE_LIMIT_MAX = 30;
+const RATE_LIMIT_MAX = 60;
 
 function checkRateLimit(key: string): boolean {
   const now = Date.now();
@@ -164,6 +165,55 @@ function getGeminiClient(): GoogleGenAI | null {
   });
 }
 
+function isTransientGeminiError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  const name = err instanceof Error ? err.name : '';
+  return (
+    name === 'TimeoutError' ||
+    name === 'AbortError' ||
+    /503|UNAVAILABLE|504|DEADLINE_EXCEEDED|high demand|aborted due to timeout|ECONNRESET|fetch failed/i.test(
+      msg,
+    )
+  );
+}
+
+async function generateWithResilience(
+  ai: GoogleGenAI,
+  params: Omit<Parameters<GoogleGenAI['models']['generateContent']>[0], 'model'>,
+  timeoutMs: number = 12000,
+) {
+  const attempts: Array<{model: string; delayMs: number}> = [
+    {model: GEMINI_MODEL, delayMs: 0},
+    {model: GEMINI_FALLBACK_MODEL, delayMs: 350},
+    {model: GEMINI_FALLBACK_MODEL, delayMs: 750},
+  ];
+
+  let lastError: unknown;
+  for (let i = 0; i < attempts.length; i++) {
+    const attempt = attempts[i];
+    if (attempt.delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, attempt.delayMs));
+    }
+    try {
+      const config = {
+        ...(params.config || {}),
+        abortSignal: AbortSignal.timeout(i === 0 ? Math.min(timeoutMs, 8000) : timeoutMs),
+      };
+      return await ai.models.generateContent({
+        ...params,
+        model: attempt.model,
+        config,
+      });
+    } catch (err) {
+      lastError = err;
+      if (!isTransientGeminiError(err)) {
+        throw err;
+      }
+    }
+  }
+  throw lastError;
+}
+
 const VALID_CATEGORIES = [
   'camiseta',
   'jean',
@@ -186,7 +236,31 @@ const RecognizeResponseSchema = z.object({
   category: z.enum(VALID_CATEGORIES),
   color: z.string().min(1).max(30),
   confidence: z.number().min(1).max(100),
+  isGarment: z.boolean().default(true),
 });
+
+function normalizeCategory(raw: string): (typeof VALID_CATEGORIES)[number] {
+  const value = raw.trim().toLowerCase();
+  if ((VALID_CATEGORIES as readonly string[]).includes(value)) {
+    return value as (typeof VALID_CATEGORIES)[number];
+  }
+  if (/camis|playera|polera|polo|blusa|top/.test(value)) return 'camiseta';
+  if (/jean|mezclilla|denim/.test(value)) return 'jean';
+  if (/pantal|jogger|chino|short|bermuda|falda/.test(value)) return 'pantalón';
+  if (/buzo|hoodie|sudadera|chaqueta|chompa|saco|su[eé]ter|abrigo/.test(value)) return 'buzo';
+  if (/gorra|cachucha|sombrero|beanie/.test(value)) return 'gorra';
+  if (/zapato|tenis|zapatilla|bota|sandalia|calzado/.test(value)) return 'zapatos';
+  if (/accesorio|bolso|morral|correa|cintur|media|gafa|bufanda|reloj/.test(value)) return 'accesorio';
+  return 'otro';
+}
+
+function extractJsonObject(rawText: string): Record<string, unknown> {
+  const cleaned = rawText
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/```\s*$/i, '')
+    .trim();
+  return JSON.parse(cleaned || '{}') as Record<string, unknown>;
+}
 
 app.post('/api/recognize', async (req, res) => {
   const parsed = RecognizeRequestSchema.safeParse(req.body);
@@ -200,7 +274,7 @@ app.post('/api/recognize', async (req, res) => {
   const rateKey = parsed.data.userId || req.ip || 'anon';
   if (!checkRateLimit(rateKey)) {
     res.status(429).json({
-      error: 'Has alcanzado el límite de 30 reconocimientos por hora. Puedes escribir el nombre manualmente.',
+      error: 'Has alcanzado el límite de reconocimientos por hora. Puedes escribir el nombre manualmente.',
     });
     return;
   }
@@ -208,69 +282,77 @@ app.post('/api/recognize', async (req, res) => {
   const ai = getGeminiClient();
   if (!ai) {
     res.status(503).json({
-      error: 'La IA no está configurada en este entorno. Escribe el nombre de la prenda manualmente.',
+      error: 'Falta configurar GEMINI_API_KEY en el servidor para usar el reconocimiento con IA.',
     });
     return;
   }
 
   try {
-    const cleanBase64 = parsed.data.imageBase64.replace(/^data:image\/\w+;base64,/, '');
+    const cleanBase64 = parsed.data.imageBase64.replace(/^data:[^;]+;base64,/i, '');
 
-    const response = await ai.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: {
-        parts: [
-          {
-            inlineData: {
-              mimeType: parsed.data.mimeType,
-              data: cleanBase64,
+    const response = await generateWithResilience(
+      ai,
+      {
+        contents: {
+          parts: [
+            {
+              inlineData: {
+                mimeType: parsed.data.mimeType,
+                data: cleanBase64,
+              },
             },
+            {
+              text: 'Observa la imagen e identifica qué prenda de vestir, calzado o accesorio aparece. Si hay una prenda visible (aunque la esté usando una persona o esté doblada/colgada), responde con isGarment=true y un nombre corto en español de Colombia (ej. "Camiseta blanca", "Jean azul", "Buzo negro", "Chaqueta denim", "Gorra negra", "Tenis blancos"). Si no hay ninguna prenda ni accesorio de moda visible, responde isGarment=false con name="Sin prenda detectada" y confidence bajo (< 40).',
+            },
+          ],
+        },
+        config: {
+          thinkingConfig: {
+            thinkingLevel: ThinkingLevel.LOW,
           },
-          {
-            text: 'Identifica la prenda de ropa o accesorio principal en la imagen. Devuelve un nombre corto y natural en español de Colombia (por ejemplo: "Camiseta blanca", "Jean azul", "Buzo gris", "Gorra negra") sin inventar marcas ni tallas.',
+          systemInstruction:
+            'Eres un experto en visión por computador para inventario de tiendas de ropa en Colombia. Responde únicamente con JSON válido siguiendo el esquema.',
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              isGarment: {
+                type: Type.BOOLEAN,
+                description:
+                  'true si en la imagen se distingue una prenda, calzado o accesorio de ropa',
+              },
+              name: {
+                type: Type.STRING,
+                description: 'Nombre corto y natural de la prenda en español, p. ej. Camiseta blanca',
+              },
+              category: {
+                type: Type.STRING,
+                description:
+                  'Categoría exacta entre: camiseta, jean, pantalón, buzo, gorra, zapatos, accesorio, otro',
+              },
+              color: {
+                type: Type.STRING,
+                description: 'Color principal de la prenda en español, p. ej. Blanco, Azul, Negro',
+              },
+              confidence: {
+                type: Type.INTEGER,
+                description: 'Nivel de confianza de 1 a 100',
+              },
+            },
+            required: ['isGarment', 'name', 'category', 'color', 'confidence'],
           },
-        ],
-      },
-      config: {
-        systemInstruction:
-          'Eres un experto en inventario de tiendas de ropa en Colombia. Responde únicamente con JSON válido siguiendo el esquema solicitado.',
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            name: {
-              type: Type.STRING,
-              description: 'Nombre corto y natural de la prenda en español, p. ej. Camiseta blanca',
-            },
-            category: {
-              type: Type.STRING,
-              description:
-                'Categoría exacta entre: camiseta, jean, pantalón, buzo, gorra, zapatos, accesorio, otro',
-            },
-            color: {
-              type: Type.STRING,
-              description: 'Color principal de la prenda en español, p. ej. Blanco, Azul, Negro',
-            },
-            confidence: {
-              type: Type.INTEGER,
-              description: 'Nivel de confianza de 1 a 100',
-            },
-          },
-          required: ['name', 'category', 'color', 'confidence'],
         },
       },
-    });
+      12000,
+    );
 
-    const rawText = (response.text ?? '{}').trim();
-    const rawJson = JSON.parse(rawText) as Record<string, unknown>;
-    const normalizedCategory = VALID_CATEGORIES.includes(
-      String(rawJson.category || '').toLowerCase() as (typeof VALID_CATEGORIES)[number],
-    )
-      ? (String(rawJson.category).toLowerCase() as (typeof VALID_CATEGORIES)[number])
-      : 'otro';
+    const rawJson = extractJsonObject(response.text ?? '{}');
+    const normalizedCategory = normalizeCategory(String(rawJson.category || 'otro'));
+    const isGarment = rawJson.isGarment !== false;
 
     const validated = RecognizeResponseSchema.parse({
-      name: String(rawJson.name || 'Prenda detectada').slice(0, 80),
+      isGarment,
+      name: String(rawJson.name || (isGarment ? 'Prenda detectada' : 'Sin prenda')).slice(0, 80),
       category: normalizedCategory,
       color: String(rawJson.color || 'Neutro').slice(0, 30),
       confidence: Math.max(1, Math.min(100, Math.round(Number(rawJson.confidence) || 88))),
@@ -278,9 +360,32 @@ app.post('/api/recognize', async (req, res) => {
 
     res.json(validated);
   } catch (err) {
-    console.error('Error en /api/recognize:', err);
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error('Error en /api/recognize:', errMsg);
+    if (/429|RESOURCE_EXHAUSTED/i.test(errMsg)) {
+      res.status(429).json({
+        error:
+          'Cuota de IA alcanzada temporalmente. Intenta en unos segundos o registra la prenda a mano.',
+      });
+      return;
+    }
+    if (/API_KEY_INVALID|API key not valid|PERMISSION_DENIED|403/i.test(errMsg)) {
+      res.status(502).json({
+        error:
+          'Verifica tu clave GEMINI_API_KEY en Settings > Secrets para activar el reconocimiento con IA.',
+      });
+      return;
+    }
+    if (isTransientGeminiError(err)) {
+      res.status(503).json({
+        error:
+          'La IA está ocupada en este momento. Toca "Reintentar con IA" o registra la prenda a mano.',
+      });
+      return;
+    }
     res.status(502).json({
-      error: 'No pudimos reconocer la prenda con la IA en este momento. Escribe el nombre manualmente.',
+      error:
+        'No pudimos analizar la imagen con la IA. Toma otra foto más nítida o escríbela manualmente.',
     });
   }
 });
@@ -408,36 +513,43 @@ app.post('/api/assistant', async (req, res) => {
       masVendidos30d: inventoryContext.topMovers,
     });
 
-    const response = await ai.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: `Pregunta del dueño del negocio: "${question}"\n\nDatos reales del inventario (NO inventes cifras ni productos):\n${contextSummary}`,
-      config: {
-        systemInstruction:
-          'Eres el Asistente IA de "Inventario Fácil IA" para pequeños comercios de ropa en Colombia. Responde en español natural y sencillo (tuteando de forma amable, sin tecnicismos). Máximo 2 o 3 frases cortas y claras. Usa ÚNICAMENTE los productos y cifras entregados en el contexto; nunca inventes cantidades ni prendas. Si la pregunta es sobre qué pedir o reponer, presenta brevemente los productos prioritarios (máximo 5).',
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            text: {
-              type: Type.STRING,
-              description: 'Respuesta breve en español colombiano usando solo los datos reales.',
-            },
-            includeOrderItems: {
-              type: Type.BOOLEAN,
-              description: 'true si conviene mostrar las tarjetas de reposición y ofrecer armar el pedido.',
-            },
-            selectedProductIds: {
-              type: Type.ARRAY,
-              items: {type: Type.STRING},
-              description: 'IDs de hasta 5 productos relevantes del contexto.',
-            },
+    const response = await generateWithResilience(
+      ai,
+      {
+        contents: `Pregunta del dueño del negocio: "${question}"\n\nDatos reales del inventario (NO inventes cifras ni productos):\n${contextSummary}`,
+        config: {
+          thinkingConfig: {
+            thinkingLevel: ThinkingLevel.LOW,
           },
-          required: ['text', 'includeOrderItems', 'selectedProductIds'],
+          systemInstruction:
+            'Eres el Asistente IA de "Inventario Fácil IA" para pequeños comercios de ropa en Colombia. Responde en español natural y sencillo (tuteando de forma amable, sin tecnicismos). Máximo 2 o 3 frases cortas y claras. Usa ÚNICAMENTE los productos y cifras entregados en el contexto; nunca inventes cantidades ni prendas. Si la pregunta es sobre qué pedir o reponer, presenta brevemente los productos prioritarios (máximo 5).',
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              text: {
+                type: Type.STRING,
+                description: 'Respuesta breve en español colombiano usando solo los datos reales.',
+              },
+              includeOrderItems: {
+                type: Type.BOOLEAN,
+                description:
+                  'true si conviene mostrar las tarjetas de reposición y ofrecer armar el pedido.',
+              },
+              selectedProductIds: {
+                type: Type.ARRAY,
+                items: {type: Type.STRING},
+                description: 'IDs de hasta 5 productos relevantes del contexto.',
+              },
+            },
+            required: ['text', 'includeOrderItems', 'selectedProductIds'],
+          },
         },
       },
-    });
+      12000,
+    );
 
-    const raw = JSON.parse((response.text ?? '{}').trim()) as {
+    const raw = extractJsonObject(response.text ?? '{}') as {
       text?: string;
       includeOrderItems?: boolean;
       selectedProductIds?: string[];

@@ -6,6 +6,7 @@ import {
   Image as ImageIcon,
   Keyboard,
   Loader2,
+  RefreshCw,
   Sparkles,
   X,
   Zap,
@@ -42,7 +43,13 @@ export const ScanPage: React.FC = () => {
   const [torchSupported, setTorchSupported] = useState(false);
   const [torchOn, setTorchOn] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  const [autoScanEnabled, setAutoScanEnabled] = useState(true);
   const [detected, setDetected] = useState<RecognizedResult | null>(null);
+  const [noGarmentHint, setNoGarmentHint] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [lastCaptured, setLastCaptured] = useState<{dataUrl: string; mimeType: string} | null>(
+    null,
+  );
   const [matchedProduct, setMatchedProduct] = useState<Product | null>(null);
   const [manualBarcodeOpen, setManualBarcodeOpen] = useState(false);
   const [manualBarcode, setManualBarcode] = useState('');
@@ -50,6 +57,7 @@ export const ScanPage: React.FC = () => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const autoScanRanRef = useRef(false);
 
   const stopCamera = useCallback(() => {
     if (streamRef.current) {
@@ -87,9 +95,18 @@ export const ScanPage: React.FC = () => {
         const video = videoRef.current;
         if (video) {
           video.srcObject = stream;
+          const markReady = () => {
+            if (!cancelled && video.videoWidth > 0 && video.videoHeight > 0) {
+              setCameraReady(true);
+              setCameraError(null);
+            }
+          };
+          video.onloadedmetadata = markReady;
+          video.oncanplay = markReady;
           await video.play().catch(() => undefined);
-          setCameraReady(true);
-          setCameraError(null);
+          if (video.readyState >= 2 && video.videoWidth > 0) {
+            markReady();
+          }
 
           const track = stream.getVideoTracks()[0];
           const caps = track?.getCapabilities?.() as {torch?: boolean} | undefined;
@@ -212,55 +229,99 @@ export const ScanPage: React.FC = () => {
     };
   }, [mode, cameraReady, matchedProduct, handleBarcodeFound]);
 
-  const recognizeImage = async (dataUrl: string, mimeType: string) => {
-    setAnalyzing(true);
-    try {
-      const res = await fetch('/api/recognize', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          imageBase64: dataUrl,
-          mimeType,
-          userId: user?.uid,
-        }),
-      });
-      const data = (await res.json()) as {
-        name?: string;
-        category?: GarmentCategory;
-        color?: string;
-        confidence?: number;
-        error?: string;
-      };
+  const recognizeImage = useCallback(
+    async (dataUrl: string, mimeType: string, isAuto: boolean = false) => {
+      setAnalyzing(true);
+      setAiError(null);
+      setNoGarmentHint(false);
+      setLastCaptured({dataUrl, mimeType});
 
-      if (!res.ok || !data.name) {
-        showToast(
-          data.error || 'No se pudo reconocer automáticamente. Puedes escribir el nombre.',
-          'info',
-        );
-        stopCamera();
-        navigate('/prendas/nueva', {
-          state: {imageUrl: dataUrl, aiRecognized: false},
+      try {
+        const res = await fetch('/api/recognize', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            imageBase64: dataUrl,
+            mimeType,
+            userId: user?.uid,
+          }),
         });
-        return;
-      }
+        const data = (await res.json()) as {
+          isGarment?: boolean;
+          name?: string;
+          category?: GarmentCategory;
+          color?: string;
+          confidence?: number;
+          error?: string;
+        };
 
-      setDetected({
-        name: data.name,
-        category: data.category || 'otro',
-        color: data.color || 'Neutro',
-        confidence: data.confidence || 90,
-        imageUrl: dataUrl,
-      });
-    } catch {
-      showToast('Sin respuesta de la IA. Te llevamos al registro manual.', 'info');
-      stopCamera();
-      navigate('/prendas/nueva', {
-        state: {imageUrl: dataUrl, aiRecognized: false},
-      });
-    } finally {
-      setAnalyzing(false);
+        if (!res.ok || !data.name) {
+          setAiError(
+            data.error ||
+              'No pudimos reconocer la prenda en este momento. Intenta tomar otra foto.',
+          );
+          if (!isAuto) {
+            showToast(data.error || 'No pudimos analizar la imagen con la IA.', 'error');
+          }
+          return;
+        }
+
+        if (data.isGarment === false) {
+          setDetected(null);
+          setNoGarmentHint(true);
+          if (!isAuto) {
+            showToast('No distinguimos una prenda clara. Acércala al marco e intenta de nuevo.', 'info');
+          }
+          return;
+        }
+
+        setDetected({
+          name: data.name,
+          category: data.category || 'otro',
+          color: data.color || 'Neutro',
+          confidence: data.confidence || 90,
+          imageUrl: dataUrl,
+        });
+      } catch {
+        const msg = 'No hubo conexión con el servicio de IA. Revisa tu red e intenta de nuevo.';
+        setAiError(msg);
+        if (!isAuto) {
+          showToast(msg, 'error');
+        }
+      } finally {
+        setAnalyzing(false);
+      }
+    },
+    [user?.uid, showToast],
+  );
+
+  // Reconocimiento automático inicial cuando la cámara enfoca una prenda
+  useEffect(() => {
+    if (
+      mode !== 'garment' ||
+      !cameraReady ||
+      !autoScanEnabled ||
+      autoScanRanRef.current ||
+      analyzing ||
+      detected
+    ) {
+      return;
     }
-  };
+
+    const timer = window.setTimeout(() => {
+      const video = videoRef.current;
+      if (!video || autoScanRanRef.current) return;
+      autoScanRanRef.current = true;
+      try {
+        const {dataUrl, mimeType} = captureVideoFrame(video, 768, 0.8);
+        void recognizeImage(dataUrl, mimeType, true);
+      } catch {
+        // Si el primer frame aún no estaba listo, el usuario puede tocar el botón
+      }
+    }, 1200);
+
+    return () => window.clearTimeout(timer);
+  }, [mode, cameraReady, autoScanEnabled, analyzing, detected, recognizeImage]);
 
   const handleCapture = async () => {
     if (analyzing) return;
@@ -274,8 +335,9 @@ export const ScanPage: React.FC = () => {
       return;
     }
     try {
-      const {dataUrl, mimeType} = captureVideoFrame(video, 640, 0.75);
-      await recognizeImage(dataUrl, mimeType);
+      setDetected(null);
+      const {dataUrl, mimeType} = captureVideoFrame(video, 768, 0.8);
+      await recognizeImage(dataUrl, mimeType, false);
     } catch {
       showToast('No se pudo capturar la foto. Intenta desde la galería.', 'error');
     }
@@ -286,8 +348,9 @@ export const ScanPage: React.FC = () => {
     e.target.value = '';
     if (!file) return;
     try {
-      const {dataUrl, mimeType} = await compressImageFile(file, 640, 0.72);
-      await recognizeImage(dataUrl, mimeType);
+      setDetected(null);
+      const {dataUrl, mimeType} = await compressImageFile(file, 768, 0.8);
+      await recognizeImage(dataUrl, mimeType, false);
     } catch {
       showToast('No pudimos leer esa imagen.', 'error');
     }
@@ -303,6 +366,16 @@ export const ScanPage: React.FC = () => {
         color: detected.color,
         imageUrl: detected.imageUrl,
         aiRecognized: true,
+      },
+    });
+  };
+
+  const handleManualFallback = () => {
+    stopCamera();
+    navigate('/prendas/nueva', {
+      state: {
+        imageUrl: lastCaptured?.dataUrl || '',
+        aiRecognized: false,
       },
     });
   };
@@ -336,9 +409,25 @@ export const ScanPage: React.FC = () => {
             <X className="h-5 w-5" />
           </button>
 
-          <h1 className="text-base font-bold text-white">
-            {mode === 'garment' ? 'Escanear prenda' : 'Código de barras'}
-          </h1>
+          <div className="flex flex-col items-center">
+            <h1 className="text-base font-bold text-white">
+              {mode === 'garment' ? 'Escanear prenda' : 'Código de barras'}
+            </h1>
+            {mode === 'garment' && cameraReady && (
+              <button
+                type="button"
+                onClick={() => setAutoScanEnabled((v) => !v)}
+                className={`mt-1 inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[10px] font-bold ${
+                  autoScanEnabled
+                    ? 'bg-[#24B570]/90 text-white'
+                    : 'bg-black/45 text-slate-300'
+                }`}
+              >
+                <Sparkles className="h-2.5 w-2.5" />
+                {autoScanEnabled ? 'IA automática activa' : 'IA manual'}
+              </button>
+            )}
+          </div>
 
           {torchSupported ? (
             <button
@@ -365,6 +454,13 @@ export const ScanPage: React.FC = () => {
             </div>
           )}
 
+          {noGarmentHint && !detected && !analyzing && mode === 'garment' && (
+            <div className="mb-3 inline-flex items-center gap-1.5 rounded-full bg-[#0A1F32]/90 px-3.5 py-1.5 text-xs font-semibold text-white ring-1 ring-white/20">
+              <Sparkles className="h-3.5 w-3.5 text-[#EF8D2A]" />
+              <span>Enfoca la prenda en el marco y toca el botón</span>
+            </div>
+          )}
+
           <div
             className={`relative flex items-center justify-center ${
               mode === 'garment' ? 'h-56 w-56' : 'h-40 w-64'
@@ -377,14 +473,16 @@ export const ScanPage: React.FC = () => {
             <span className="absolute bottom-0 right-0 h-8 w-8 rounded-br-xl border-b-4 border-r-4 border-[#24B570]" />
 
             {analyzing && (
-              <div className="flex flex-col items-center gap-2 rounded-2xl bg-black/65 px-5 py-4 backdrop-blur-md">
+              <div className="flex flex-col items-center gap-2 rounded-2xl bg-black/70 px-5 py-4 backdrop-blur-md">
                 <Loader2 className="h-7 w-7 animate-spin text-[#24B570]" />
-                <span className="text-xs font-semibold text-white">Analizando prenda con IA...</span>
+                <span className="text-xs font-semibold text-white">
+                  Identificando prenda con IA...
+                </span>
               </div>
             )}
 
             {cameraError && !analyzing && (
-              <div className="rounded-2xl bg-[#0A1F32]/90 p-4 text-center border border-white/15">
+              <div className="rounded-2xl border border-white/15 bg-[#0A1F32]/90 p-4 text-center">
                 <Camera className="mx-auto mb-2 h-6 w-6 text-[#EF8D2A]" />
                 <p className="text-xs leading-relaxed text-slate-200">{cameraError}</p>
                 <div className="mt-3 flex flex-col gap-2">
@@ -397,10 +495,7 @@ export const ScanPage: React.FC = () => {
                   </button>
                   <button
                     type="button"
-                    onClick={() => {
-                      stopCamera();
-                      navigate('/prendas/nueva');
-                    }}
+                    onClick={handleManualFallback}
                     className="min-h-[38px] rounded-xl border border-white/25 px-3 text-xs font-semibold text-white"
                   >
                     Registrar a mano
@@ -413,6 +508,31 @@ export const ScanPage: React.FC = () => {
 
         {/* Panel inferior + Controles */}
         <div className="relative z-10 px-4 pb-[calc(22px+env(safe-area-inset-bottom,0px))]">
+          {aiError && !analyzing && mode === 'garment' && (
+            <div className="mb-4 rounded-[18px] border border-[#EF8D2A]/40 bg-[#0A1F32]/95 p-4 text-white shadow-xl backdrop-blur-md">
+              <p className="text-xs font-semibold leading-relaxed text-amber-200">{aiError}</p>
+              <div className="mt-3 flex gap-2">
+                {lastCaptured && (
+                  <button
+                    type="button"
+                    onClick={() => void recognizeImage(lastCaptured.dataUrl, lastCaptured.mimeType)}
+                    className="flex min-h-[42px] flex-1 items-center justify-center gap-1.5 rounded-[12px] bg-[#1F69FC] px-3 text-xs font-bold text-white"
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    Reintentar con IA
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={handleManualFallback}
+                  className="min-h-[42px] flex-1 rounded-[12px] border border-white/25 px-3 text-xs font-semibold text-white"
+                >
+                  Registrar a mano
+                </button>
+              </div>
+            </div>
+          )}
+
           {detected && mode === 'garment' && (
             <div className="mb-4 flex items-center justify-between gap-3 rounded-[18px] bg-white p-4 text-[#071C2D] shadow-xl">
               <div className="min-w-0">
@@ -420,21 +540,35 @@ export const ScanPage: React.FC = () => {
                   La IA detectó
                 </p>
                 <p className="truncate text-base font-extrabold text-[#071C2D]">{detected.name}</p>
-                <p className="text-xs text-[#5C7B98]">Confirma o toma otra foto</p>
+                <p className="text-xs capitalize text-[#5C7B98]">
+                  {detected.category} · {detected.color}
+                </p>
               </div>
-              <button
-                type="button"
-                onClick={handleUseDetected}
-                className="min-h-[44px] shrink-0 rounded-[12px] bg-[#1F69FC] px-5 text-sm font-bold text-white shadow-sm active:scale-95"
-              >
-                Usar
-              </button>
+              <div className="flex shrink-0 items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDetected(null);
+                    setAiError(null);
+                  }}
+                  className="min-h-[44px] rounded-[12px] border border-slate-200 px-3 text-xs font-bold text-[#5C7B98] active:scale-95"
+                >
+                  Otra
+                </button>
+                <button
+                  type="button"
+                  onClick={handleUseDetected}
+                  className="min-h-[44px] rounded-[12px] bg-[#1F69FC] px-5 text-sm font-bold text-white shadow-sm active:scale-95"
+                >
+                  Usar
+                </button>
+              </div>
             </div>
           )}
 
           <p className="mb-4 text-center text-xs font-medium text-slate-300">
             {mode === 'garment'
-              ? 'Mantén la prenda dentro del marco'
+              ? 'Mantén la prenda dentro del marco y toca para escanear'
               : 'Apunta al código de barras o escríbelo'}
           </p>
 
@@ -450,7 +584,7 @@ export const ScanPage: React.FC = () => {
 
             <button
               type="button"
-              aria-label={mode === 'garment' ? 'Tomar foto' : 'Ingresar código manual'}
+              aria-label={mode === 'garment' ? 'Escanear prenda con IA' : 'Ingresar código manual'}
               onClick={handleCapture}
               disabled={analyzing}
               className="flex h-[70px] w-[70px] items-center justify-center rounded-full border-4 border-white/40 bg-white text-[#0A1F32] shadow-xl active:scale-95 transition-transform disabled:opacity-60"
@@ -467,6 +601,8 @@ export const ScanPage: React.FC = () => {
               aria-label="Cambiar a escáner de código de barras"
               onClick={() => {
                 setDetected(null);
+                setAiError(null);
+                setNoGarmentHint(false);
                 setMode((m) => (m === 'garment' ? 'barcode' : 'garment'));
               }}
               className={`flex h-12 w-12 items-center justify-center rounded-full backdrop-blur-sm active:scale-95 ${
