@@ -147,6 +147,11 @@
         "aiRecognized": {
           "type": "boolean"
         },
+        "expiresAt": {
+          "type": "string",
+          "description": "Fecha opcional de caducidad o vencimiento en formato YYYY-MM-DD.",
+          "maxLength": 20
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time"
@@ -172,6 +177,74 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "FcmToken": {
+      "title": "Token FCM del dispositivo",
+      "description": "Token de Firebase Cloud Messaging registrado por un dispositivo del usuario.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "token": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 500
+        },
+        "platform": {
+          "type": "string",
+          "enum": ["ios", "android", "web"]
+        },
+        "deviceLabel": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["userId", "token", "platform", "deviceLabel", "enabled", "createdAt", "updatedAt"]
+    },
+    "NotificationPrefs": {
+      "title": "Preferencias de notificaciones push",
+      "description": "Configuración de alertas push de stock bajo y prendas próximas a caducar.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "pushEnabled": {
+          "type": "boolean"
+        },
+        "lowStockEnabled": {
+          "type": "boolean"
+        },
+        "expiringEnabled": {
+          "type": "boolean"
+        },
+        "expiryWarningDays": {
+          "type": "integer"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["userId", "pushEnabled", "lowStockEnabled", "expiringEnabled", "expiryWarningDays", "updatedAt"]
     },
     "Movement": {
       "title": "Movimiento de inventario",
@@ -279,6 +352,14 @@
     "/users/{userId}/orders/{orderId}": {
       "schema": { "$ref": "#/entities/Order" },
       "description": "Pedidos de reposición creados desde Alertas o el Asistente IA."
+    },
+    "/users/{userId}/fcmTokens/{tokenId}": {
+      "schema": { "$ref": "#/entities/FcmToken" },
+      "description": "Tokens FCM de dispositivos registrados para recibir notificaciones push."
+    },
+    "/users/{userId}/notificationSettings/{settingId}": {
+      "schema": { "$ref": "#/entities/NotificationPrefs" },
+      "description": "Preferencias de notificaciones push del propietario."
     }
   }
 }

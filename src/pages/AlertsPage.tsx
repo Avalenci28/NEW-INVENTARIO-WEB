@@ -1,7 +1,8 @@
 import React, {useMemo, useState} from 'react';
-import {Check, CheckCircle2, Filter, ShoppingBag} from 'lucide-react';
+import {BellRing, CalendarClock, Check, CheckCircle2, Filter, ShoppingBag} from 'lucide-react';
 import {GarmentThumbnail} from '../components/GarmentThumbnail';
 import {MobileShell} from '../components/MobileShell';
+import {NotificationSettingsSheet} from '../components/NotificationSettingsSheet';
 import {OrderDraftSheet} from '../components/OrderDraftSheet';
 import {useInventory} from '../context/InventoryContext';
 import {useToast} from '../context/ToastContext';
@@ -10,7 +11,8 @@ import type {AlertSeverity, LowStockAlertItem} from '../types/inventory';
 type FilterMode = 'all' | AlertSeverity;
 
 export const AlertsPage: React.FC = () => {
-  const {products, alerts, activeDraftOrder, addAlertToDraftOrder} = useInventory();
+  const {products, alerts, activeDraftOrder, notificationPrefs, addAlertToDraftOrder} =
+    useInventory();
   const {showToast} = useToast();
 
   const [filterOpen, setFilterOpen] = useState(false);
@@ -18,6 +20,7 @@ export const AlertsPage: React.FC = () => {
   const [expanded, setExpanded] = useState(false);
   const [addingId, setAddingId] = useState<string | null>(null);
   const [orderSheetOpen, setOrderSheetOpen] = useState(false);
+  const [notifSheetOpen, setNotifSheetOpen] = useState(false);
 
   const filteredAlerts = useMemo(() => {
     if (filterMode === 'all') return alerts;
@@ -61,7 +64,7 @@ export const AlertsPage: React.FC = () => {
             <h1 className="text-[24px] font-extrabold tracking-tight text-[#071C2D]">Alertas</h1>
             <p className="mt-0.5 text-xs font-medium text-[#5C7B98] tabular-nums">
               {alerts.length}{' '}
-              {alerts.length === 1 ? 'producto por reponer' : 'productos por reponer'}
+              {alerts.length === 1 ? 'producto por revisar' : 'productos por revisar'}
             </p>
           </div>
 
@@ -78,6 +81,21 @@ export const AlertsPage: React.FC = () => {
             )}
             <button
               type="button"
+              aria-label="Notificaciones push"
+              onClick={() => setNotifSheetOpen(true)}
+              className={`relative flex h-11 w-11 items-center justify-center rounded-full border ${
+                notificationPrefs.pushEnabled
+                  ? 'border-[#24B570]/40 bg-[#E3F7EC] text-[#15803D]'
+                  : 'border-slate-200 bg-white text-[#071C2D]'
+              }`}
+            >
+              <BellRing className="h-5 w-5" />
+              {!notificationPrefs.pushEnabled && (
+                <span className="absolute top-2 right-2 h-2 w-2 rounded-full bg-[#1F69FC]" />
+              )}
+            </button>
+            <button
+              type="button"
               aria-label="Filtrar alertas"
               onClick={() => setFilterOpen((v) => !v)}
               className={`flex h-11 w-11 items-center justify-center rounded-full border ${
@@ -91,6 +109,31 @@ export const AlertsPage: React.FC = () => {
           </div>
         </header>
 
+        {!notificationPrefs.pushEnabled && (
+          <button
+            type="button"
+            onClick={() => setNotifSheetOpen(true)}
+            className="mt-3 flex min-h-[52px] w-full items-center justify-between gap-3 rounded-[16px] border border-[#1F69FC]/25 bg-[#E6EEFF]/80 px-3.5 py-2.5 text-left"
+          >
+            <div className="flex items-center gap-2.5">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#1F69FC] text-white">
+                <BellRing className="h-4 w-4" />
+              </div>
+              <div>
+                <p className="text-xs font-extrabold text-[#071C2D]">
+                  Recibe alertas push en tu celular
+                </p>
+                <p className="text-[11px] font-medium text-[#5C7B98]">
+                  Avísame por bajo stock o prendas próximas a caducar
+                </p>
+              </div>
+            </div>
+            <span className="shrink-0 rounded-full bg-[#1F69FC] px-3 py-1.5 text-[11px] font-bold text-white">
+              Activar
+            </span>
+          </button>
+        )}
+
         {filterOpen && (
           <div className="mt-3 flex gap-2 overflow-x-auto pb-1 no-scrollbar">
             {(
@@ -99,6 +142,8 @@ export const AlertsPage: React.FC = () => {
                 {key: 'agotado', label: 'Agotados'},
                 {key: 'bajo_minimo', label: 'Bajo el mínimo'},
                 {key: 'se_acaba_pronto', label: 'Se acaba pronto'},
+                {key: 'proxima_a_caducar', label: 'Por caducar'},
+                {key: 'caducada', label: 'Caducadas'},
               ] as const
             ).map((opt) => (
               <button
@@ -122,7 +167,7 @@ export const AlertsPage: React.FC = () => {
             <CheckCircle2 className="mx-auto mb-2 h-8 w-8 text-[#24B570]" />
             <p className="text-base font-extrabold text-[#071C2D]">¡Sin alertas pendientes!</p>
             <p className="mt-1 text-xs text-[#15803D]">
-              Todas tus prendas están por encima de su mínimo configurado.
+              Todas tus prendas están por encima de su mínimo y dentro de fecha.
             </p>
           </div>
         ) : (
@@ -130,6 +175,8 @@ export const AlertsPage: React.FC = () => {
             {visibleAlerts.map((alert) => {
               const inOrder = draftProductIds.has(alert.product.id);
               const isOut = alert.severity === 'agotado';
+              const isExpired = alert.severity === 'caducada';
+              const isExpiringSoon = alert.severity === 'proxima_a_caducar';
               const isEarly = alert.severity === 'se_acaba_pronto';
               const ratio =
                 alert.product.minStock > 0
@@ -155,6 +202,18 @@ export const AlertsPage: React.FC = () => {
                           <p className="truncate text-sm font-extrabold text-[#071C2D]">
                             {alert.product.name}
                           </p>
+                          {isExpired && (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-bold text-red-700">
+                              <CalendarClock className="h-3 w-3" />
+                              Caducada
+                            </span>
+                          )}
+                          {isExpiringSoon && (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-[#E6EEFF] px-2 py-0.5 text-[10px] font-bold text-[#1F69FC]">
+                              <CalendarClock className="h-3 w-3" />
+                              Por caducar
+                            </span>
+                          )}
                           {isEarly && (
                             <span className="rounded-full bg-[#FEF3C7] px-2 py-0.5 text-[10px] font-bold text-[#B45309]">
                               Se acaba pronto
@@ -163,17 +222,31 @@ export const AlertsPage: React.FC = () => {
                         </div>
                         <p
                           className={`mt-0.5 text-xs font-bold tabular-nums ${
-                            isOut ? 'text-red-600' : 'text-[#EF8D2A]'
+                            isOut || isExpired
+                              ? 'text-red-600'
+                              : isExpiringSoon
+                                ? 'text-[#1F69FC]'
+                                : 'text-[#EF8D2A]'
                           }`}
                         >
                           {isOut
                             ? `Agotado · mínimo ${alert.product.minStock}`
-                            : `Quedan ${alert.product.quantity} uds · mínimo ${alert.product.minStock}`}
+                            : isExpired
+                              ? `Caducada (${alert.product.expiresAt}) · ${alert.product.quantity} uds`
+                              : isExpiringSoon && alert.expiresInDays !== null
+                                ? `Caduca en ${alert.expiresInDays} ${alert.expiresInDays === 1 ? 'día' : 'días'} · ${alert.product.quantity} uds`
+                                : `Quedan ${alert.product.quantity} uds · mínimo ${alert.product.minStock}`}
                         </p>
                         <div className="mt-1.5 h-1.5 w-32 overflow-hidden rounded-full bg-slate-100">
                           <div
                             className={`h-full rounded-full ${
-                              isOut ? 'bg-red-500' : isEarly ? 'bg-amber-400' : 'bg-[#EF8D2A]'
+                              isOut || isExpired
+                                ? 'bg-red-500'
+                                : isExpiringSoon
+                                  ? 'bg-[#1F69FC]'
+                                  : isEarly
+                                    ? 'bg-amber-400'
+                                    : 'bg-[#EF8D2A]'
                             }`}
                             style={{width: `${Math.max(8, ratio)}%`}}
                           />
@@ -233,6 +306,11 @@ export const AlertsPage: React.FC = () => {
         order={activeDraftOrder}
         open={orderSheetOpen}
         onClose={() => setOrderSheetOpen(false)}
+      />
+
+      <NotificationSettingsSheet
+        open={notifSheetOpen}
+        onClose={() => setNotifSheetOpen(false)}
       />
     </MobileShell>
   );

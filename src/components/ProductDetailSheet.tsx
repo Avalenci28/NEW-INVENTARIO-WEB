@@ -1,6 +1,15 @@
 import React, {useEffect, useState} from 'react';
 import {AnimatePresence, motion} from 'motion/react';
-import {ArrowDownLeft, ArrowUpRight, Minus, Plus, Sparkles, Trash2, X} from 'lucide-react';
+import {
+  ArrowDownLeft,
+  ArrowUpRight,
+  CalendarClock,
+  Minus,
+  Plus,
+  Sparkles,
+  Trash2,
+  X,
+} from 'lucide-react';
 import {useInventory} from '../context/InventoryContext';
 import {useToast} from '../context/ToastContext';
 import {computeAutoMinStock} from '../lib/inventoryAnalytics';
@@ -26,6 +35,7 @@ export const ProductDetailSheet: React.FC<ProductDetailSheetProps> = ({product, 
   const [editSpaceId, setEditSpaceId] = useState('');
   const [editMinStock, setEditMinStock] = useState(5);
   const [editAutoMin, setEditAutoMin] = useState(false);
+  const [editExpiresAt, setEditExpiresAt] = useState('');
 
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -41,6 +51,7 @@ export const ProductDetailSheet: React.FC<ProductDetailSheetProps> = ({product, 
       setEditSpaceId(product.spaceId);
       setEditMinStock(product.minStock);
       setEditAutoMin(product.autoMinStock);
+      setEditExpiresAt(product.expiresAt || '');
       setConfirmDelete(false);
     }
   }, [product]);
@@ -87,6 +98,7 @@ export const ProductDetailSheet: React.FC<ProductDetailSheetProps> = ({product, 
         spaceId: editSpaceId,
         minStock: editAutoMin ? recommendedMin : editMinStock,
         autoMinStock: editAutoMin,
+        expiresAt: editExpiresAt.trim(),
       });
       showToast('Prenda actualizada.');
       onClose();
@@ -153,6 +165,12 @@ export const ProductDetailSheet: React.FC<ProductDetailSheetProps> = ({product, 
                       {product.quantity} uds
                     </span>
                   </p>
+                  {product.expiresAt && (
+                    <p className="mt-0.5 inline-flex items-center gap-1 text-[11px] font-semibold text-[#1F69FC]">
+                      <CalendarClock className="h-3 w-3" />
+                      Caducidad: {product.expiresAt}
+                    </p>
+                  )}
                 </div>
               </div>
               <button
@@ -343,6 +361,32 @@ export const ProductDetailSheet: React.FC<ProductDetailSheetProps> = ({product, 
                     onChange={(e) => setEditMinStock(Math.max(0, Number(e.target.value) || 0))}
                     className="mt-2 min-h-[44px] w-full rounded-lg border border-slate-200 bg-white px-3 text-base font-semibold text-[#071C2D] disabled:opacity-65"
                   />
+                </div>
+
+                <div>
+                  <div className="mb-1 flex items-center justify-between">
+                    <label className="text-xs font-semibold text-[#5C7B98]">
+                      Fecha de caducidad (opcional)
+                    </label>
+                    {editExpiresAt && (
+                      <button
+                        type="button"
+                        onClick={() => setEditExpiresAt('')}
+                        className="text-xs font-bold text-[#1F69FC]"
+                      >
+                        Quitar fecha
+                      </button>
+                    )}
+                  </div>
+                  <div className="flex min-h-[48px] items-center gap-2 rounded-[12px] border border-slate-200 bg-[#F8FAFC] px-3.5">
+                    <CalendarClock className="h-4 w-4 shrink-0 text-[#1F69FC]" />
+                    <input
+                      type="date"
+                      value={editExpiresAt}
+                      onChange={(e) => setEditExpiresAt(e.target.value)}
+                      className="w-full bg-transparent text-base text-[#071C2D] focus:outline-none"
+                    />
+                  </div>
                 </div>
 
                 <button

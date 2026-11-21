@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import crypto from 'crypto';
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
@@ -14,6 +15,122 @@ const PORT = Number(process.env.PORT) || 3000;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-4-hydrogen';
 
 app.use(express.json({limit: '8mb'}));
+
+// Configuración pública de Firebase Web para el Service Worker de FCM
+app.get('/firebase-sw-config.js', (_req, res) => {
+  try {
+    const configPath = path.resolve(__dirname, 'firebase-applet-config.json');
+    const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+    const publicConfig = {
+      apiKey: raw.apiKey,
+      authDomain: raw.authDomain,
+      projectId: raw.projectId,
+      storageBucket: raw.storageBucket,
+      messagingSenderId: raw.messagingSenderId,
+      appId: raw.appId,
+    };
+    res.type('application/javascript');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.send(`self.__FIREBASE_CONFIG__ = ${JSON.stringify(publicConfig)};`);
+  } catch {
+    res.type('application/javascript').status(200).send('self.__FIREBASE_CONFIG__ = null;');
+  }
+});
+
+// Inicio de sesión de demostración académica (sin redirecciones ni popups externos)
+const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+const DEMO_USER = (process.env.DEMO_USER || 'admin').trim();
+const DEMO_PASSWORD = process.env.DEMO_PASSWORD || 'admin';
+const DEMO_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+
+function safeEqualText(a: string, b: string): boolean {
+  const hashA = crypto.createHash('sha256').update(a).digest();
+  const hashB = crypto.createHash('sha256').update(b).digest();
+  return crypto.timingSafeEqual(hashA, hashB);
+}
+
+function signDemoToken(uid: string): string {
+  const payload = Buffer.from(
+    JSON.stringify({uid, exp: Date.now() + DEMO_SESSION_TTL_MS}),
+    'utf-8',
+  ).toString('base64url');
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
+  return `${payload}.${sig}`;
+}
+
+function verifyDemoToken(token: string): {uid: string; exp: number} | null {
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const [payload, sig] = parts;
+  const expectedSig = crypto
+    .createHmac('sha256', SESSION_SECRET)
+    .update(payload)
+    .digest('base64url');
+  if (!safeEqualText(sig, expectedSig)) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8')) as {
+      uid?: string;
+      exp?: number;
+    };
+    if (!parsed.uid || typeof parsed.exp !== 'number' || parsed.exp < Date.now()) {
+      return null;
+    }
+    return {uid: parsed.uid, exp: parsed.exp};
+  } catch {
+    return null;
+  }
+}
+
+const DemoLoginSchema = z.object({
+  username: z.string().min(1).max(120),
+  password: z.string().min(1).max(120),
+});
+
+app.post('/api/demo-login', (req, res) => {
+  const parsed = DemoLoginSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({error: 'Ingresa tu usuario y contraseña.'});
+    return;
+  }
+
+  const cleanUser = parsed.data.username.trim();
+  const userMatch = safeEqualText(cleanUser, DEMO_USER);
+  const passMatch = safeEqualText(parsed.data.password, DEMO_PASSWORD);
+
+  if (!userMatch || !passMatch) {
+    res.status(401).json({
+      error: 'Usuario o contraseña incorrectos. Verifica tus datos e intenta de nuevo.',
+    });
+    return;
+  }
+
+  const user = {
+    uid: 'demo_admin',
+    email: 'admin@inventariofacil.demo',
+    displayName: 'Alison Lara',
+  };
+  res.json({
+    token: signDemoToken(user.uid),
+    user,
+  });
+});
+
+app.get('/api/demo-session', (req, res) => {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+  const verified = token ? verifyDemoToken(token) : null;
+  if (!verified) {
+    res.status(401).json({error: 'Sesión no válida.'});
+    return;
+  }
+  res.json({
+    user: {
+      uid: verified.uid,
+      email: 'admin@inventariofacil.demo',
+      displayName: 'Alison Lara',
+    },
+  });
+});
 
 // Rate limiter en memoria: 30 reconocimientos por hora por usuario/IP
 const recognizeRateMap = new Map<string, number[]>();

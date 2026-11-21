@@ -148,13 +148,24 @@ export function computeAbcStats(products: Product[], movements: Movement[]): Map
   return result;
 }
 
+export function computeDaysUntilExpiry(expiresAt?: string): number | null {
+  if (!expiresAt) return null;
+  const parsed = new Date(`${expiresAt}T23:59:59`);
+  if (Number.isNaN(parsed.getTime())) return null;
+  const now = new Date();
+  const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const targetDay = new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate()).getTime();
+  return Math.round((targetDay - startToday) / (24 * 60 * 60 * 1000));
+}
+
 /**
- * Alertas de stock bajo + Alerta anticipada (Idea SIT 2: < 7 días de cobertura).
+ * Alertas de stock bajo + Alerta anticipada (Idea SIT 2: < 7 días de cobertura) + Próximas a caducar.
  */
 export function computeLowStockAlerts(
   products: Product[],
   spaces: Space[],
   abcMap: Map<string, AbcProductStats>,
+  expiryWarningDays: number = 7,
 ): LowStockAlertItem[] {
   const spaceNameMap = new Map(spaces.map((s) => [s.id, s.name]));
   const alerts: LowStockAlertItem[] = [];
@@ -165,20 +176,39 @@ export function computeLowStockAlerts(
     const daysRemaining = stats?.daysRemaining ?? null;
     const abcClass = stats?.abcClass ?? 'C';
     const suggestedQty = stats?.suggestedQty ?? computeSuggestedOrderQty(0, product.quantity, product.minStock);
+    const expiresInDays = computeDaysUntilExpiry(product.expiresAt);
 
     const isOut = product.quantity === 0;
     const isBelowMin = product.quantity <= product.minStock;
     const isRunningOutSoon = !isBelowMin && daysRemaining !== null && daysRemaining < 7;
+    const isExpired = expiresInDays !== null && expiresInDays <= 0;
+    const isExpiringSoon =
+      expiresInDays !== null && expiresInDays > 0 && expiresInDays <= expiryWarningDays;
 
-    if (!isOut && !isBelowMin && !isRunningOutSoon) {
+    if (!isOut && !isBelowMin && !isRunningOutSoon && !isExpired && !isExpiringSoon) {
       continue;
     }
 
-    const severity = isOut ? 'agotado' : isBelowMin ? 'bajo_minimo' : 'se_acaba_pronto';
+    const severity: LowStockAlertItem['severity'] = isOut
+      ? 'agotado'
+      : isExpired
+        ? 'caducada'
+        : isBelowMin
+          ? 'bajo_minimo'
+          : isExpiringSoon
+            ? 'proxima_a_caducar'
+            : 'se_acaba_pronto';
 
     let contextText = 'Stock por debajo del mínimo configurado';
     if (isOut) {
       contextText = 'Sin unidades disponibles en inventario';
+    } else if (isExpired) {
+      contextText = 'Fecha de caducidad vencida · revisar o retirar';
+    } else if (isExpiringSoon && expiresInDays !== null) {
+      contextText =
+        expiresInDays === 1
+          ? 'Caduca mañana · priorizar venta o promoción'
+          : `Próxima a caducar en ${expiresInDays} días`;
     } else if (isRunningOutSoon && daysRemaining !== null) {
       contextText = `Al ritmo actual se agota en ~${Math.max(1, daysRemaining)} días`;
     } else if (sold30d >= 10 || abcClass === 'A') {
@@ -187,12 +217,15 @@ export function computeLowStockAlerts(
       contextText = 'Rotación constante este mes';
     }
 
-    // Puntaje de urgencia: menor es más urgente
     const urgencyScore = isOut
       ? -1000
-      : isBelowMin
-        ? (product.quantity - product.minStock) * 10 + (daysRemaining ?? 30) - (abcClass === 'A' ? 25 : 0)
-        : 200 + (daysRemaining ?? 7);
+      : isExpired
+        ? -800
+        : isBelowMin
+          ? (product.quantity - product.minStock) * 10 + (daysRemaining ?? 30) - (abcClass === 'A' ? 25 : 0)
+          : isExpiringSoon
+            ? 100 + (expiresInDays ?? 7)
+            : 200 + (daysRemaining ?? 7);
 
     alerts.push({
       product,
@@ -201,6 +234,7 @@ export function computeLowStockAlerts(
       abcClass,
       sold30d,
       daysRemaining,
+      expiresInDays,
       suggestedQty,
       contextText,
       urgencyScore,

@@ -1,18 +1,11 @@
-import React, {createContext, useCallback, useContext, useEffect, useState} from 'react';
-import {
-  createUserWithEmailAndPassword,
-  onAuthStateChanged,
-  sendEmailVerification,
-  sendPasswordResetEmail,
-  signInWithEmailAndPassword,
-  signInWithPopup,
-  signOut,
-  updateProfile,
-  type User,
-} from 'firebase/auth';
-import {doc, getDoc, serverTimestamp, setDoc, updateDoc} from 'firebase/firestore';
-import {auth, db, googleProvider, handleFirestoreError, OperationType} from '../lib/firebase';
+import React, {createContext, useCallback, useContext, useState} from 'react';
 import type {UserProfile} from '../types/inventory';
+
+export interface AppUser {
+  uid: string;
+  email: string;
+  displayName: string;
+}
 
 interface RegisterPayload {
   fullName: string;
@@ -22,178 +15,140 @@ interface RegisterPayload {
 }
 
 interface AuthContextValue {
-  user: User | null;
+  user: AppUser | null;
   profile: UserProfile | null;
   loading: boolean;
-  loginWithEmail: (email: string, password: string) => Promise<void>;
-  registerWithEmail: (payload: RegisterPayload) => Promise<void>;
-  loginWithGoogle: (businessNameOverride?: string) => Promise<void>;
-  resetPassword: (email: string) => Promise<void>;
+  authToken: string | null;
+  loginWithDemo: (username: string, password: string) => Promise<void>;
+  registerDemoAccount: (payload: RegisterPayload) => Promise<void>;
   updateUserProfile: (data: {fullName: string; businessName: string}) => Promise<void>;
   logout: () => Promise<void>;
 }
 
-const AuthContext = createContext<AuthContextValue | null>(null);
+const DEMO_PROFILE_KEY = 'inventario_facil_demo_profile_v1';
 
-export function mapAuthErrorMessage(error: unknown): string {
-  const code = (error as {code?: string})?.code || '';
-  switch (code) {
-    case 'auth/invalid-credential':
-    case 'auth/wrong-password':
-    case 'auth/user-not-found':
-      return 'Correo o contraseña incorrectos.';
-    case 'auth/email-already-in-use':
-      return 'Ya existe una cuenta registrada con este correo.';
-    case 'auth/invalid-email':
-      return 'Ingresa un correo electrónico válido.';
-    case 'auth/weak-password':
-      return 'La contraseña debe tener al menos 8 caracteres.';
-    case 'auth/too-many-requests':
-      return 'Demasiados intentos seguidos. Espera unos minutos e intenta de nuevo.';
-    case 'auth/popup-closed-by-user':
-      return 'Se cerró la ventana de Google antes de completar el ingreso.';
-    case 'auth/operation-not-allowed':
-      return 'El inicio de sesión con correo/contraseña aún no está habilitado en Firebase Console. Usa "Continuar con Google" o actívalo en Authentication > Sign-in method.';
-    case 'auth/network-request-failed':
-      return 'Sin conexión a internet. Revisa tu red e intenta nuevamente.';
-    default:
-      return error instanceof Error && error.message
-        ? error.message
-        : 'No pudimos completar la autenticación. Intenta de nuevo.';
+function loadSavedDemoProfile(userId: string, email: string): UserProfile {
+  const defaults: UserProfile = {
+    userId,
+    fullName: 'Alison Lara',
+    businessName: 'Mi tienda de ropa',
+    email,
+    acceptedTermsAt: new Date().toISOString(),
+  };
+  try {
+    const raw = window.localStorage.getItem(DEMO_PROFILE_KEY);
+    if (!raw) return defaults;
+    const parsed = JSON.parse(raw) as Partial<UserProfile>;
+    return {
+      ...defaults,
+      fullName: typeof parsed.fullName === 'string' && parsed.fullName.trim() ? parsed.fullName : defaults.fullName,
+      businessName:
+        typeof parsed.businessName === 'string' && parsed.businessName.trim()
+          ? parsed.businessName
+          : defaults.businessName,
+    };
+  } catch {
+    return defaults;
   }
 }
 
+function saveDemoProfile(profile: UserProfile): void {
+  try {
+    window.localStorage.setItem(
+      DEMO_PROFILE_KEY,
+      JSON.stringify({
+        fullName: profile.fullName,
+        businessName: profile.businessName,
+      }),
+    );
+  } catch {
+    // Ignorar errores en modo privado de Safari
+  }
+}
+
+const AuthContext = createContext<AuthContextValue | null>(null);
+
 export const AuthProvider: React.FC<{children: React.ReactNode}> = ({children}) => {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<AppUser | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [authToken, setAuthToken] = useState<string | null>(null);
+  const [loading] = useState(false);
 
-  const loadOrCreateProfile = useCallback(
-    async (firebaseUser: User, defaults?: {fullName?: string; businessName?: string}) => {
-      const path = `users/${firebaseUser.uid}`;
-      const ref = doc(db, path);
-      try {
-        const snap = await getDoc(ref);
-        if (snap.exists()) {
-          setProfile(snap.data() as UserProfile);
-          return;
-        }
+  const loginWithDemo = useCallback(async (username: string, password: string) => {
+    const cleanUser = username.trim();
+    if (!cleanUser || !password) {
+      throw new Error('Ingresa tu usuario y contraseña.');
+    }
 
-        const newProfile: UserProfile = {
-          userId: firebaseUser.uid,
-          fullName: defaults?.fullName || firebaseUser.displayName || 'Alison Lara',
-          businessName: defaults?.businessName || 'Mi tienda de ropa',
-          email: firebaseUser.email || 'usuario@tienda.co',
-          acceptedTermsAt: new Date().toISOString(),
-        };
-
-        await setDoc(ref, {
-          ...newProfile,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-        setProfile(newProfile);
-      } catch (err) {
-        handleFirestoreError(err, OperationType.GET, path);
-      }
-    },
-    [],
-  );
-
-  useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
-      setUser(firebaseUser);
-      if (firebaseUser) {
-        try {
-          await loadOrCreateProfile(firebaseUser);
-        } catch {
-          // Error ya reportado por handleFirestoreError
-        }
-      } else {
-        setProfile(null);
-      }
-      setLoading(false);
+    const res = await fetch('/api/demo-login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username: cleanUser, password}),
     });
-    return () => unsub();
-  }, [loadOrCreateProfile]);
 
-  const loginWithEmail = useCallback(async (email: string, password: string) => {
-    await signInWithEmailAndPassword(auth, email.trim(), password);
+    const data = (await res.json().catch(() => ({}))) as {
+      token?: string;
+      user?: AppUser;
+      error?: string;
+    };
+
+    if (!res.ok || !data.token || !data.user) {
+      throw new Error(
+        data.error || 'Usuario o contraseña incorrectos. Verifica tus datos e intenta de nuevo.',
+      );
+    }
+
+    setAuthToken(data.token);
+    setUser(data.user);
+    setProfile(loadSavedDemoProfile(data.user.uid, data.user.email));
   }, []);
 
-  const registerWithEmail = useCallback(
-    async ({fullName, businessName, email, password}: RegisterPayload) => {
-      const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
-      await updateProfile(cred.user, {displayName: fullName.trim()});
-
-      const path = `users/${cred.user.uid}`;
-      const newProfile: UserProfile = {
-        userId: cred.user.uid,
-        fullName: fullName.trim(),
-        businessName: businessName.trim(),
-        email: email.trim(),
+  const registerDemoAccount = useCallback(
+    async ({fullName, businessName, email}: RegisterPayload) => {
+      const demoUser: AppUser = {
+        uid: 'demo_admin',
+        email: email.trim() || 'admin@inventariofacil.demo',
+        displayName: fullName.trim() || 'Alison Lara',
+      };
+      const nextProfile: UserProfile = {
+        userId: demoUser.uid,
+        fullName: fullName.trim() || 'Alison Lara',
+        businessName: businessName.trim() || 'Mi tienda de ropa',
+        email: demoUser.email,
         acceptedTermsAt: new Date().toISOString(),
       };
-
-      try {
-        await setDoc(doc(db, path), {
-          ...newProfile,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-        setProfile(newProfile);
-      } catch (err) {
-        handleFirestoreError(err, OperationType.CREATE, path);
-      }
-
-      try {
-        await sendEmailVerification(cred.user);
-      } catch {
-        // Opcional: no bloquear si el entorno restringe el envío de correo
-      }
+      saveDemoProfile(nextProfile);
+      setUser(demoUser);
+      setProfile(nextProfile);
     },
     [],
   );
-
-  const loginWithGoogle = useCallback(
-    async (businessNameOverride?: string) => {
-      const result = await signInWithPopup(auth, googleProvider);
-      await loadOrCreateProfile(result.user, {
-        fullName: result.user.displayName || 'Mi cuenta',
-        businessName: businessNameOverride || 'Mi tienda de ropa',
-      });
-    },
-    [loadOrCreateProfile],
-  );
-
-  const resetPassword = useCallback(async (email: string) => {
-    await sendPasswordResetEmail(auth, email.trim());
-  }, []);
 
   const updateUserProfile = useCallback(
     async (data: {fullName: string; businessName: string}) => {
       if (!user) return;
-      const path = `users/${user.uid}`;
-      try {
-        await updateDoc(doc(db, path), {
-          fullName: data.fullName.trim(),
-          businessName: data.businessName.trim(),
-          updatedAt: serverTimestamp(),
-        });
-        setProfile((prev) =>
-          prev
-            ? {...prev, fullName: data.fullName.trim(), businessName: data.businessName.trim()}
-            : null,
-        );
-      } catch (err) {
-        handleFirestoreError(err, OperationType.UPDATE, path);
-      }
+      const nextFullName = data.fullName.trim();
+      const nextBusinessName = data.businessName.trim();
+      setProfile((prev) => {
+        const next: UserProfile = prev
+          ? {...prev, fullName: nextFullName, businessName: nextBusinessName}
+          : {
+              userId: user.uid,
+              fullName: nextFullName,
+              businessName: nextBusinessName,
+              email: user.email,
+              acceptedTermsAt: new Date().toISOString(),
+            };
+        saveDemoProfile(next);
+        return next;
+      });
     },
     [user],
   );
 
   const logout = useCallback(async () => {
-    await signOut(auth);
+    setAuthToken(null);
+    setUser(null);
     setProfile(null);
   }, []);
 
@@ -203,10 +158,9 @@ export const AuthProvider: React.FC<{children: React.ReactNode}> = ({children}) 
         user,
         profile,
         loading,
-        loginWithEmail,
-        registerWithEmail,
-        loginWithGoogle,
-        resetPassword,
+        authToken,
+        loginWithDemo,
+        registerDemoAccount,
         updateUserProfile,
         logout,
       }}

@@ -1,6 +1,6 @@
 import React, {useEffect, useState} from 'react';
 import {useLocation, useNavigate, useSearchParams} from 'react-router-dom';
-import {ArrowLeft, Barcode, Bell, Layers, Minus, Plus, Sparkles} from 'lucide-react';
+import {ArrowLeft, Barcode, Bell, CalendarClock, Layers, Minus, Plus, Sparkles} from 'lucide-react';
 import {GarmentThumbnail} from '../components/GarmentThumbnail';
 import {MobileShell} from '../components/MobileShell';
 import {SpaceFormSheet} from '../components/SpaceFormSheet';
@@ -54,6 +54,7 @@ export const NewProductPage: React.FC = () => {
   const [autoMinStock, setAutoMinStock] = useState(false);
   const [minStock, setMinStock] = useState(5);
   const [barcode, setBarcode] = useState(initialBarcode);
+  const [expiresAt, setExpiresAt] = useState('');
 
   const [newSpaceOpen, setNewSpaceOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -95,6 +96,7 @@ export const NewProductPage: React.FC = () => {
         barcode,
         imageUrl,
         aiRecognized,
+        expiresAt: expiresAt.trim(),
       });
       showToast('Prenda guardada en tu inventario.');
       navigate(`/espacios/${spaceId}`, {replace: true});
@@ -301,6 +303,33 @@ export const NewProductPage: React.FC = () => {
                 className="w-20 rounded-lg border border-slate-200 bg-[#F8FAFC] px-2.5 py-1.5 text-base font-bold text-[#071C2D] tabular-nums disabled:opacity-70"
               />
               <span className="text-sm font-medium text-[#5C7B98]">unidades</span>
+            </div>
+          </div>
+
+          {/* Fecha de caducidad / lote (opcional) */}
+          <div>
+            <div className="mb-1.5 flex items-center justify-between">
+              <label className="text-xs font-semibold text-[#5C7B98]">
+                Fecha de caducidad o lote (opcional)
+              </label>
+              {expiresAt && (
+                <button
+                  type="button"
+                  onClick={() => setExpiresAt('')}
+                  className="text-xs font-bold text-[#1F69FC]"
+                >
+                  Limpiar
+                </button>
+              )}
+            </div>
+            <div className="flex min-h-[48px] items-center gap-2.5 rounded-[12px] border border-slate-200 bg-white px-3.5">
+              <CalendarClock className="h-4 w-4 shrink-0 text-[#1F69FC]" />
+              <input
+                type="date"
+                value={expiresAt}
+                onChange={(e) => setExpiresAt(e.target.value)}
+                className="w-full bg-transparent text-base font-semibold text-[#071C2D] focus:outline-none"
+              />
             </div>
           </div>
 

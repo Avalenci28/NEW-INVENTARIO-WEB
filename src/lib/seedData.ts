@@ -1,6 +1,13 @@
 import {collection, doc, getDocs, query, serverTimestamp, where, writeBatch} from 'firebase/firestore';
 import {db, handleFirestoreError, OperationType} from './firebase';
-import type {GarmentCategory, SpaceColor, SpaceType} from '../types/inventory';
+import type {
+  GarmentCategory,
+  Movement,
+  Product,
+  Space,
+  SpaceColor,
+  SpaceType,
+} from '../types/inventory';
 
 interface SeedSpace {
   key: string;
@@ -468,4 +475,112 @@ export async function loadExampleInventoryData(userId: string): Promise<void> {
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `${basePath}/spaces`);
   }
+}
+
+export function buildDemoSeedState(userId: string): {
+  spaces: Space[];
+  products: Product[];
+  movements: Movement[];
+} {
+  const spaces: Space[] = [];
+  const products: Product[] = [];
+  const movements: Movement[] = [];
+  const spaceIdMap = new Map<string, string>();
+
+  for (const s of SEED_SPACES) {
+    const id = `demo_space_${s.key}`;
+    spaceIdMap.set(s.key, id);
+    spaces.push({
+      id,
+      userId,
+      name: s.name,
+      type: s.type,
+      color: s.color,
+      location: s.location,
+    });
+  }
+
+  const now = Date.now();
+  const today912 = new Date();
+  today912.setHours(9, 12, 0, 0);
+  const today840 = new Date();
+  today840.setHours(8, 40, 0, 0);
+  const yesterday = new Date(now - 24 * 60 * 60 * 1000);
+
+  let camisetaBlancaId = '';
+  let gorraNegraId = '';
+  const estanteAId = spaceIdMap.get('estante_a') || '';
+
+  SEED_PRODUCTS.forEach((p, idx) => {
+    const spaceId = spaceIdMap.get(p.spaceKey)!;
+    const productId = `demo_prod_${idx + 1}`;
+    if (p.name === 'Camiseta blanca M') camisetaBlancaId = productId;
+    if (p.name === 'Gorra negra') gorraNegraId = productId;
+
+    products.push({
+      id: productId,
+      userId,
+      spaceId,
+      name: p.name,
+      category: p.category,
+      size: p.size,
+      color: p.color,
+      quantity: p.quantity,
+      minStock: p.minStock,
+      autoMinStock: p.autoMinStock,
+      barcode: p.barcode,
+      imageUrl: '',
+      aiRecognized: true,
+    });
+
+    p.soldEvents.forEach((ev, evIdx) => {
+      const occurredAt =
+        p.name === 'Jean azul 32' && ev.daysAgo === 0
+          ? today840.toISOString()
+          : new Date(now - ev.daysAgo * 24 * 60 * 60 * 1000).toISOString();
+      movements.push({
+        id: `demo_mov_${idx + 1}_${evIdx + 1}`,
+        userId,
+        productId,
+        productName: p.name,
+        spaceId,
+        type: 'salida',
+        quantity: ev.qty,
+        note: 'Venta en tienda',
+        occurredAt,
+      });
+    });
+  });
+
+  if (camisetaBlancaId) {
+    movements.push({
+      id: 'demo_mov_recent_camiseta',
+      userId,
+      productId: camisetaBlancaId,
+      productName: 'Camiseta blanca M',
+      spaceId: estanteAId,
+      type: 'entrada',
+      quantity: 12,
+      note: 'Reposición de proveedor',
+      occurredAt: today912.toISOString(),
+    });
+  }
+
+  if (gorraNegraId) {
+    movements.push({
+      id: 'demo_mov_recent_gorra',
+      userId,
+      productId: gorraNegraId,
+      productName: 'Gorra negra',
+      spaceId: estanteAId,
+      type: 'entrada',
+      quantity: 6,
+      note: 'Ingreso de bodega',
+      occurredAt: yesterday.toISOString(),
+    });
+  }
+
+  movements.sort((a, b) => new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime());
+
+  return {spaces, products, movements};
 }

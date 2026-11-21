@@ -61,7 +61,7 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'userId', 'spaceId', 'name', 'category', 'size', 'color',
           'quantity', 'minStock', 'autoMinStock', 'barcode', 'imageUrl',
-          'aiRecognized', 'createdAt', 'updatedAt'
+          'aiRecognized', 'expiresAt', 'createdAt', 'updatedAt'
         ])
         && data.userId is string && data.userId == userId && data.userId == request.auth.uid
         && isValidId(data.spaceId)
@@ -75,6 +75,7 @@ service cloud.firestore {
         && data.barcode is string && data.barcode.size() <= 64
         && data.imageUrl is string && data.imageUrl.size() <= 180000
         && data.aiRecognized is bool
+        && (!('expiresAt' in data) || (data.expiresAt is string && data.expiresAt.size() <= 20))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -103,6 +104,29 @@ service cloud.firestore {
         && data.items[0].productId is string && data.items[0].productId.size() <= 128
         && data.notes is string && data.notes.size() <= 500
         && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidFcmToken(data, userId) {
+      return data.keys().hasAll(['userId', 'token', 'platform', 'deviceLabel', 'enabled', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['userId', 'token', 'platform', 'deviceLabel', 'enabled', 'createdAt', 'updatedAt'])
+        && data.userId is string && data.userId == userId && data.userId == request.auth.uid
+        && data.token is string && data.token.size() >= 10 && data.token.size() <= 500
+        && data.platform is string && data.platform in ['ios', 'android', 'web']
+        && data.deviceLabel is string && data.deviceLabel.size() <= 100
+        && data.enabled is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidNotificationPrefs(data, userId) {
+      return data.keys().hasAll(['userId', 'pushEnabled', 'lowStockEnabled', 'expiringEnabled', 'expiryWarningDays', 'updatedAt'])
+        && data.keys().hasOnly(['userId', 'pushEnabled', 'lowStockEnabled', 'expiringEnabled', 'expiryWarningDays', 'updatedAt'])
+        && data.userId is string && data.userId == userId && data.userId == request.auth.uid
+        && data.pushEnabled is bool
+        && data.lowStockEnabled is bool
+        && data.expiringEnabled is bool
+        && data.expiryWarningDays is int && data.expiryWarningDays >= 1 && data.expiryWarningDays <= 60
         && data.updatedAt is timestamp;
     }
 
@@ -164,7 +188,7 @@ service cloud.firestore {
             (
               incoming().diff(existing()).affectedKeys().hasOnly([
                 'spaceId', 'name', 'category', 'size', 'color',
-                'minStock', 'autoMinStock', 'barcode', 'imageUrl', 'updatedAt'
+                'minStock', 'autoMinStock', 'barcode', 'imageUrl', 'expiresAt', 'updatedAt'
               ])
               && exists(/databases/$(database)/documents/users/$(userId)/spaces/$(incoming().spaceId))
             )
@@ -202,13 +226,43 @@ service cloud.firestore {
           && incoming().createdAt == existing().createdAt
           && incoming().updatedAt == request.time
           && (
-            // Acción 1: Editar ítems o notas del borrador
             incoming().diff(existing()).affectedKeys().hasOnly(['items', 'notes', 'updatedAt'])
             ||
-            // Acción 2: Cambiar estado (borrador -> enviado -> recibido)
             incoming().diff(existing()).affectedKeys().hasOnly(['status', 'items', 'notes', 'updatedAt'])
           );
         allow delete: if isValidId(userId) && isValidId(orderId) && isOwner(userId);
+      }
+
+      // Tokens de dispositivos FCM
+      match /fcmTokens/{tokenId} {
+        allow get: if isValidId(userId) && isValidId(tokenId) && isOwner(userId);
+        allow list: if isOwner(userId) && resource.data.userId == request.auth.uid;
+        allow create: if isValidId(userId) && isValidId(tokenId) && isOwner(userId)
+          && isValidFcmToken(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isValidId(userId) && isValidId(tokenId) && isOwner(userId)
+          && isValidFcmToken(incoming(), userId)
+          && incoming().userId == existing().userId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['token', 'platform', 'deviceLabel', 'enabled', 'updatedAt']);
+        allow delete: if isValidId(userId) && isValidId(tokenId) && isOwner(userId);
+      }
+
+      // Preferencias de notificaciones push
+      match /notificationSettings/{settingId} {
+        allow get: if isValidId(userId) && isValidId(settingId) && isOwner(userId);
+        allow list: if isOwner(userId) && resource.data.userId == request.auth.uid;
+        allow create: if isValidId(userId) && isValidId(settingId) && isOwner(userId)
+          && isValidNotificationPrefs(incoming(), userId)
+          && incoming().updatedAt == request.time;
+        allow update: if isValidId(userId) && isValidId(settingId) && isOwner(userId)
+          && isValidNotificationPrefs(incoming(), userId)
+          && incoming().userId == existing().userId
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['pushEnabled', 'lowStockEnabled', 'expiringEnabled', 'expiryWarningDays', 'updatedAt']);
+        allow delete: if isValidId(userId) && isValidId(settingId) && isOwner(userId);
       }
     }
   }

@@ -3,18 +3,18 @@ import {Link, useNavigate} from 'react-router-dom';
 import {ArrowLeft, Eye, EyeOff, Lock, Mail, Store, User} from 'lucide-react';
 import {z} from 'zod';
 import {MobileShell} from '../components/MobileShell';
-import {mapAuthErrorMessage, useAuth} from '../context/AuthContext';
+import {useAuth} from '../context/AuthContext';
 import {useToast} from '../context/ToastContext';
 
 const RegisterSchema = z.object({
   fullName: z.string().trim().min(2, 'Ingresa tu nombre completo.'),
   businessName: z.string().trim().min(2, 'Ingresa el nombre de tu negocio.'),
   email: z.string().trim().email('Ingresa un correo electrónico válido.'),
-  password: z.string().min(8, 'La contraseña debe tener mínimo 8 caracteres.'),
+  password: z.string().min(4, 'La contraseña debe tener mínimo 4 caracteres.'),
 });
 
 export const RegisterPage: React.FC = () => {
-  const {user, loading, registerWithEmail, loginWithGoogle} = useAuth();
+  const {user, loading, registerDemoAccount} = useAuth();
   const {showToast} = useToast();
   const navigate = useNavigate();
 
@@ -50,29 +50,15 @@ export const RegisterPage: React.FC = () => {
 
     setSubmitting(true);
     try {
-      await registerWithEmail(parsed.data);
+      await registerDemoAccount(parsed.data);
       showToast('¡Cuenta creada! Bienvenido a Inventario Fácil IA.');
       navigate('/inicio', {replace: true});
     } catch (err) {
-      setErrorMsg(mapAuthErrorMessage(err));
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const handleGoogle = async () => {
-    setErrorMsg('');
-    if (!acceptedTerms) {
-      setErrorMsg('Acepta primero la Ley 1581 de 2012 para crear tu cuenta con Google.');
-      return;
-    }
-    setSubmitting(true);
-    try {
-      await loginWithGoogle(businessName.trim() || undefined);
-      showToast('Sesión iniciada con Google.');
-      navigate('/inicio', {replace: true});
-    } catch (err) {
-      setErrorMsg(mapAuthErrorMessage(err));
+      setErrorMsg(
+        err instanceof Error && err.message
+          ? err.message
+          : 'No pudimos crear la cuenta demo. Intenta de nuevo.',
+      );
     } finally {
       setSubmitting(false);
     }
@@ -139,6 +125,8 @@ export const RegisterPage: React.FC = () => {
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="tucorreo@ejemplo.com"
                 autoComplete="email"
+                autoCapitalize="none"
+                autoCorrect="off"
                 className="w-full bg-transparent text-base text-[#071C2D] placeholder:text-slate-400 focus:outline-none"
               />
             </div>
@@ -152,15 +140,17 @@ export const RegisterPage: React.FC = () => {
                 type={showPassword ? 'text' : 'password'}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="Mínimo 8 caracteres"
+                placeholder="Mínimo 4 caracteres"
                 autoComplete="new-password"
+                autoCapitalize="none"
+                autoCorrect="off"
                 className="w-full bg-transparent text-base text-[#071C2D] placeholder:text-slate-400 focus:outline-none"
               />
               <button
                 type="button"
                 aria-label={showPassword ? 'Ocultar contraseña' : 'Ver contraseña'}
                 onClick={() => setShowPassword((v) => !v)}
-                className="flex h-9 w-9 items-center justify-center rounded-full text-[#5C7B98]"
+                className="flex h-10 w-10 items-center justify-center rounded-full text-[#5C7B98]"
               >
                 {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
               </button>
@@ -188,7 +178,10 @@ export const RegisterPage: React.FC = () => {
           </label>
 
           {errorMsg && (
-            <div className="rounded-xl bg-red-50 px-3.5 py-2.5 text-xs font-medium text-red-700 border border-red-200">
+            <div
+              role="alert"
+              className="rounded-xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-xs font-semibold text-red-700"
+            >
               {errorMsg}
             </div>
           )}
@@ -199,33 +192,6 @@ export const RegisterPage: React.FC = () => {
             className="mt-1 flex min-h-[48px] w-full items-center justify-center rounded-[14px] bg-[#1F69FC] px-4 text-[15px] font-bold text-white shadow-sm active:scale-[0.99] disabled:opacity-60"
           >
             {submitting ? 'Creando cuenta...' : 'Crear cuenta'}
-          </button>
-
-          <button
-            type="button"
-            disabled={submitting}
-            onClick={handleGoogle}
-            className="flex min-h-[48px] w-full items-center justify-center gap-2.5 rounded-[14px] border border-slate-200 bg-white px-4 text-sm font-semibold text-[#071C2D] hover:bg-slate-50"
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                fill="#4285F4"
-                d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17Z"
-              />
-              <path
-                fill="#34A853"
-                d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.72-4.96H1.29v3.14C3.26 21.3 7.31 24 12 24Z"
-              />
-              <path
-                fill="#FBBC05"
-                d="M5.28 14.24c-.24-.72-.38-1.49-.38-2.24s.14-1.52.38-2.24V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.99-3.14Z"
-              />
-              <path
-                fill="#EA4335"
-                d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96Z"
-              />
-            </svg>
-            Continuar con Google
           </button>
         </form>
 

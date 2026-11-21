@@ -1,11 +1,12 @@
 import React, {useState} from 'react';
 import {AnimatePresence, motion} from 'motion/react';
 import {Link} from 'react-router-dom';
-import {Database, Download, LogOut, Share, ShieldCheck, Store, X} from 'lucide-react';
+import {BellRing, Database, Download, LogOut, Share, ShieldCheck, Store, X} from 'lucide-react';
 import {useAuth} from '../context/AuthContext';
 import {useInventory} from '../context/InventoryContext';
 import {useToast} from '../context/ToastContext';
 import {usePWAInstall} from '../hooks/usePWAInstall';
+import {NotificationSettingsSheet} from './NotificationSettingsSheet';
 
 interface AccountSheetProps {
   open: boolean;
@@ -14,7 +15,7 @@ interface AccountSheetProps {
 
 export const AccountSheet: React.FC<AccountSheetProps> = ({open, onClose}) => {
   const {user, profile, updateUserProfile, logout} = useAuth();
-  const {seedDemoData} = useInventory();
+  const {seedDemoData, notificationPrefs} = useInventory();
   const {showToast} = useToast();
   const {isInstallable, isInstalled, isIOS, install} = usePWAInstall();
 
@@ -23,6 +24,7 @@ export const AccountSheet: React.FC<AccountSheetProps> = ({open, onClose}) => {
   const [saving, setSaving] = useState(false);
   const [seeding, setSeeding] = useState(false);
   const [showIOSGuide, setShowIOSGuide] = useState(false);
+  const [notifSheetOpen, setNotifSheetOpen] = useState(false);
 
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -61,6 +63,7 @@ export const AccountSheet: React.FC<AccountSheetProps> = ({open, onClose}) => {
   };
 
   return (
+    <>
     <AnimatePresence>
       {open && (
         <div className="fixed inset-0 z-50 flex items-end justify-center">
@@ -134,6 +137,26 @@ export const AccountSheet: React.FC<AccountSheetProps> = ({open, onClose}) => {
             <div className="mt-4 space-y-2.5 border-t border-slate-100 pt-4">
               <button
                 type="button"
+                onClick={() => setNotifSheetOpen(true)}
+                className="flex min-h-[48px] w-full items-center justify-between rounded-[14px] border border-slate-200 bg-[#F8FAFC] px-4 text-sm font-semibold text-[#071C2D]"
+              >
+                <span className="flex items-center gap-2">
+                  <BellRing className="h-4 w-4 text-[#1F69FC]" />
+                  Notificaciones push (FCM)
+                </span>
+                <span
+                  className={`rounded-full px-2.5 py-0.5 text-[11px] font-bold ${
+                    notificationPrefs.pushEnabled
+                      ? 'bg-[#E3F7EC] text-[#15803D]'
+                      : 'bg-slate-200 text-[#5C7B98]'
+                  }`}
+                >
+                  {notificationPrefs.pushEnabled ? 'Activas' : 'Configurar'}
+                </span>
+              </button>
+
+              <button
+                type="button"
                 disabled={seeding}
                 onClick={handleSeed}
                 className="flex min-h-[48px] w-full items-center justify-center gap-2 rounded-[14px] border border-[#1F69FC]/30 bg-[#E6EEFF] px-4 text-sm font-semibold text-[#1F69FC]"
@@ -196,5 +219,11 @@ export const AccountSheet: React.FC<AccountSheetProps> = ({open, onClose}) => {
         </div>
       )}
     </AnimatePresence>
+
+    <NotificationSettingsSheet
+      open={notifSheetOpen}
+      onClose={() => setNotifSheetOpen(false)}
+    />
+    </>
   );
 };

@@ -47,6 +47,7 @@ export interface Product {
   barcode: string;
   imageUrl: string;
   aiRecognized: boolean;
+  expiresAt?: string;
   createdAt?: unknown;
   updatedAt?: unknown;
 }
@@ -96,7 +97,12 @@ export interface AbcProductStats {
   suggestedQty: number;
 }
 
-export type AlertSeverity = 'agotado' | 'bajo_minimo' | 'se_acaba_pronto';
+export type AlertSeverity =
+  | 'agotado'
+  | 'bajo_minimo'
+  | 'se_acaba_pronto'
+  | 'caducada'
+  | 'proxima_a_caducar';
 
 export interface LowStockAlertItem {
   product: Product;
@@ -105,7 +111,28 @@ export interface LowStockAlertItem {
   abcClass: AbcClass;
   sold30d: number;
   daysRemaining: number | null;
+  expiresInDays: number | null;
   suggestedQty: number;
   contextText: string;
   urgencyScore: number;
+}
+
+export interface FcmDeviceToken {
+  id: string;
+  userId: string;
+  token: string;
+  platform: 'ios' | 'android' | 'web';
+  deviceLabel: string;
+  enabled: boolean;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface NotificationPreferences {
+  userId: string;
+  pushEnabled: boolean;
+  lowStockEnabled: boolean;
+  expiringEnabled: boolean;
+  expiryWarningDays: number;
+  updatedAt?: unknown;
 }

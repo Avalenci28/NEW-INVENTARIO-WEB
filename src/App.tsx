@@ -2,6 +2,7 @@ import React, {Suspense, lazy, useEffect, useState} from 'react';
 import {BrowserRouter, Navigate, Route, Routes} from 'react-router-dom';
 import {WifiOff} from 'lucide-react';
 import {ErrorBoundary} from './components/ErrorBoundary';
+import {PushNotificationMonitor} from './components/PushNotificationMonitor';
 import {AuthProvider, useAuth} from './context/AuthContext';
 import {InventoryProvider} from './context/InventoryContext';
 import {ToastProvider} from './context/ToastContext';
@@ -73,6 +74,7 @@ export default function App() {
       <ToastProvider>
         <AuthProvider>
           <InventoryProvider>
+            <PushNotificationMonitor />
             <OfflineBanner />
             <BrowserRouter>
               <Suspense
