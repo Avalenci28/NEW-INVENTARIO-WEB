@@ -20,7 +20,10 @@ export const ToastProvider: React.FC<{children: React.ReactNode}> = ({children})
 
   const showToast = useCallback((message: string, tone: ToastTone = 'success') => {
     const id = Date.now() + Math.floor(Math.random() * 1000);
-    setToasts((prev) => [...prev.slice(-2), {id, message, tone}]);
+    setToasts((prev) => [
+      ...prev.filter((t) => t.message !== message).slice(-1),
+      {id, message, tone},
+    ]);
     window.setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
     }, 3400);

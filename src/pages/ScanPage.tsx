@@ -419,7 +419,7 @@ export const ScanPage: React.FC = () => {
       const video = videoRef.current;
       if (!video || autoScanRanRef.current) return;
       try {
-        const {dataUrl, mimeType, isDark} = captureVideoFrame(video, 640, 0.72);
+        const {dataUrl, mimeType, isDark} = captureVideoFrame(video, 512, 0.7);
         if (isDark) {
           // Si el sensor de iPhone aún estaba oscuro al iniciar, no gastar petición
           return;
@@ -447,7 +447,7 @@ export const ScanPage: React.FC = () => {
     }
     try {
       setDetected(null);
-      const {dataUrl, mimeType} = captureVideoFrame(video, 640, 0.72);
+      const {dataUrl, mimeType} = captureVideoFrame(video, 512, 0.7);
       await recognizeImage(dataUrl, mimeType, false);
     } catch {
       showToast('No se pudo capturar la foto. Intenta desde la galería.', 'error');
@@ -460,7 +460,7 @@ export const ScanPage: React.FC = () => {
     if (!file) return;
     try {
       setDetected(null);
-      const {dataUrl, mimeType} = await compressImageFile(file, 640, 0.72);
+      const {dataUrl, mimeType} = await compressImageFile(file, 512, 0.7);
       await recognizeImage(dataUrl, mimeType, false);
     } catch {
       showToast('No pudimos leer esa imagen.', 'error');

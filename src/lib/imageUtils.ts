@@ -1,7 +1,7 @@
 export async function compressImageFile(
   file: Blob,
-  maxDimension: number = 640,
-  quality: number = 0.72,
+  maxDimension: number = 512,
+  quality: number = 0.7,
 ): Promise<{dataUrl: string; mimeType: string}> {
   const bitmapUrl = URL.createObjectURL(file);
   try {
@@ -35,8 +35,8 @@ export async function compressImageFile(
 
 export function captureVideoFrame(
   video: HTMLVideoElement,
-  maxDimension: number = 640,
-  quality: number = 0.72,
+  maxDimension: number = 512,
+  quality: number = 0.7,
 ): {dataUrl: string; mimeType: string; isDark: boolean} {
   if (video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
     throw new Error('La cámara aún está enfocando. Intenta de nuevo en un momento.');

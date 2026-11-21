@@ -1,6 +1,6 @@
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {useNavigate, useSearchParams} from 'react-router-dom';
-import {Bot, Loader2, Send, ShoppingBag} from 'lucide-react';
+import {Bot, ExternalLink, Globe, Loader2, Send, ShoppingBag} from 'lucide-react';
 import {GarmentThumbnail} from '../components/GarmentThumbnail';
 import {MobileShell} from '../components/MobileShell';
 import {OrderDraftSheet} from '../components/OrderDraftSheet';
@@ -18,18 +18,25 @@ interface AssistantSuggestedItem {
   pedir: number;
 }
 
+interface GroundingSource {
+  title: string;
+  uri: string;
+}
+
 interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   text: string;
   items?: AssistantSuggestedItem[];
   askToCreateOrder?: boolean;
+  sources?: GroundingSource[];
 }
 
 const SUGGESTED_CHIPS = [
   '¿Qué debo pedir esta semana?',
   '¿Qué productos rotan más?',
   'Resumen de stock bajo',
+  'Tendencias de ropa en Colombia',
 ];
 
 export const AssistantPage: React.FC = () => {
@@ -49,6 +56,7 @@ export const AssistantPage: React.FC = () => {
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
+  const [useWebSearch, setUseWebSearch] = useState(false);
   const [sending, setSending] = useState(false);
   const [orderSheetOpen, setOrderSheetOpen] = useState(false);
 
@@ -56,7 +64,9 @@ export const AssistantPage: React.FC = () => {
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   const inventoryContext = useMemo(() => {
-    const recommendations = alerts.slice(0, 10).map((a) => ({
+    const spaceNameById = new Map(spaces.map((s) => [s.id, s.name]));
+
+    const recommendations = alerts.slice(0, 12).map((a) => ({
       productId: a.product.id,
       name: a.product.name,
       size: a.product.size,
@@ -79,6 +89,16 @@ export const AssistantPage: React.FC = () => {
         abcClass: s.abcClass,
       }));
 
+    const inventoryItems = products.slice(0, 60).map((p) => ({
+      name: p.name,
+      size: p.size || 'Única',
+      category: p.category,
+      quantity: p.quantity,
+      minStock: p.minStock,
+      spaceName: spaceNameById.get(p.spaceId) || 'Sin espacio',
+      abcClass: abcMap.get(p.id)?.abcClass || ('C' as const),
+    }));
+
     return {
       businessName: profile?.businessName || 'Mi tienda de ropa',
       totalUnits,
@@ -86,13 +106,22 @@ export const AssistantPage: React.FC = () => {
       lowStockCount: alerts.length,
       recommendations,
       topMovers,
+      inventoryItems,
     };
-  }, [profile?.businessName, totalUnits, spaces.length, alerts, abcMap]);
+  }, [profile?.businessName, totalUnits, spaces, products, alerts, abcMap]);
 
   const sendQuestion = useCallback(
-    async (questionText: string) => {
+    async (questionText: string, forceWebSearch?: boolean) => {
       const clean = questionText.trim();
       if (!clean || sending) return;
+
+      const historyPayload = messages
+        .filter((m) => m.id !== 'welcome-ai')
+        .slice(-12)
+        .map((m) => ({
+          role: m.role,
+          text: m.text,
+        }));
 
       const userMsg: ChatMessage = {
         id: `u-${Date.now()}`,
@@ -104,60 +133,99 @@ export const AssistantPage: React.FC = () => {
       setSending(true);
 
       try {
-        const res = await fetch('/api/assistant', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            question: clean,
-            inventoryContext,
-          }),
+        const bodyPayload = JSON.stringify({
+          question: clean,
+          history: historyPayload,
+          useWebSearch: forceWebSearch ?? useWebSearch,
+          inventoryContext,
         });
-        const data = (await res.json()) as {
+
+        type AssistantApiPayload = {
           text?: string;
           items?: AssistantSuggestedItem[];
           askToCreateOrder?: boolean;
+          sources?: GroundingSource[];
           error?: string;
         };
+
+        let data: AssistantApiPayload | null = null;
+
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const controller = new AbortController();
+          const timeoutId = window.setTimeout(() => controller.abort(), 20000);
+          try {
+            const res = await fetch('/api/assistant', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              cache: 'no-store',
+              credentials: 'same-origin',
+              signal: controller.signal,
+              body: bodyPayload,
+            });
+            window.clearTimeout(timeoutId);
+
+            const rawText = await res.text();
+            let parsed: AssistantApiPayload | null = null;
+            if (rawText) {
+              try {
+                parsed = JSON.parse(rawText) as AssistantApiPayload;
+              } catch {
+                parsed = null;
+              }
+            }
+
+            if (!parsed) {
+              if ((res.status === 502 || res.status === 504) && attempt === 0) {
+                await new Promise((r) => window.setTimeout(r, 400));
+                continue;
+              }
+              data = {
+                error: 'El asistente tardó en responder. Intenta enviar tu pregunta de nuevo.',
+              };
+              break;
+            }
+
+            data = parsed;
+            break;
+          } catch (err) {
+            window.clearTimeout(timeoutId);
+            if (attempt === 0) {
+              await new Promise((r) => window.setTimeout(r, 350));
+              continue;
+            }
+            throw err;
+          }
+        }
 
         const replyMsg: ChatMessage = {
           id: `a-${Date.now()}`,
           role: 'assistant',
           text:
-            data.text ||
-            data.error ||
-            'No pude consultar tu inventario en este momento. Intenta de nuevo.',
-          items: data.items,
-          askToCreateOrder: data.askToCreateOrder,
+            data?.text ||
+            data?.error ||
+            'No pude consultar con Gemini en este momento. Intenta de nuevo.',
+          items: data?.items,
+          askToCreateOrder: data?.askToCreateOrder,
+          sources: data?.sources,
         };
         setMessages((prev) => [...prev, replyMsg]);
       } catch {
-        // Respaldo local directo si no hay red hacia /api/assistant
-        const top = alerts.slice(0, 3);
         setMessages((prev) => [
           ...prev,
           {
             id: `a-${Date.now()}`,
             role: 'assistant',
             text:
-              top.length > 0
-                ? 'Estas prendas se venden rápido y quedan pocas unidades:'
-                : 'Todo tu inventario tiene buen stock en este momento.',
-            items: top.map((a) => ({
-              productId: a.product.id,
-              nombre: a.product.name,
-              size: a.product.size,
-              category: a.product.category,
-              quedan: a.product.quantity,
-              pedir: a.suggestedQty,
-            })),
-            askToCreateOrder: top.length > 0,
+              typeof navigator !== 'undefined' && navigator.onLine === false
+                ? 'Sin conexión a internet. Verifica tu Wi-Fi o datos móviles e intenta de nuevo.'
+                : 'No pudimos conectar con Gemini en este momento. Intenta enviar tu pregunta de nuevo.',
           },
         ]);
       } finally {
         setSending(false);
       }
     },
-    [sending, inventoryContext, alerts],
+    [sending, messages, useWebSearch, inventoryContext],
   );
 
   // Al iniciar o venir desde "Ver sugerencia" en Inicio, dispara la consulta principal
@@ -169,7 +237,7 @@ export const AssistantPage: React.FC = () => {
         {
           id: 'welcome-ai',
           role: 'assistant',
-          text: '¡Hola! Cuando agregues prendas a tu inventario podré decirte qué se vende más y qué debes pedir cada semana.',
+          text: '¡Hola! Soy tu asistente con Gemini. Cuando agregues prendas podré decirte qué se vende más, qué pedir cada semana o consultar tendencias en Google.',
         },
       ]);
       return;
@@ -181,7 +249,7 @@ export const AssistantPage: React.FC = () => {
         searchParams.get('auto') === '1'
           ? '¿Qué debo pedir esta semana?'
           : '¿Qué debo pedir esta semana?';
-      void sendQuestion(initialQ);
+      void sendQuestion(initialQ, false);
     }
   }, [products.length, messages.length, searchParams, sendQuestion]);
 
@@ -222,16 +290,33 @@ export const AssistantPage: React.FC = () => {
             </div>
           </div>
 
-          {activeDraftOrder && (
+          <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => setOrderSheetOpen(true)}
-              className="flex min-h-[38px] items-center gap-1.5 rounded-full bg-[#0A1F32] px-3 text-xs font-bold text-white"
+              onClick={() => setUseWebSearch((v) => !v)}
+              aria-pressed={useWebSearch}
+              className={`flex min-h-[36px] items-center gap-1 rounded-full px-2.5 text-[11px] font-bold transition-colors ${
+                useWebSearch
+                  ? 'bg-[#1F69FC] text-white'
+                  : 'border border-slate-200 bg-slate-50 text-[#5C7B98]'
+              }`}
+              title="Activar búsqueda en Google para datos y tendencias actuales"
             >
-              <ShoppingBag className="h-3.5 w-3.5 text-[#EF8D2A]" />
-              Pedido ({activeDraftOrder.items.length})
+              <Globe className="h-3.5 w-3.5" />
+              Web
             </button>
-          )}
+
+            {activeDraftOrder && (
+              <button
+                type="button"
+                onClick={() => setOrderSheetOpen(true)}
+                className="flex min-h-[36px] items-center gap-1.5 rounded-full bg-[#0A1F32] px-3 text-xs font-bold text-white"
+              >
+                <ShoppingBag className="h-3.5 w-3.5 text-[#EF8D2A]" />
+                Pedido ({activeDraftOrder.items.length})
+              </button>
+            )}
+          </div>
         </header>
 
         {/* Chips sugeridos */}
@@ -260,7 +345,32 @@ export const AssistantPage: React.FC = () => {
             ) : (
               <div key={msg.id} className="flex justify-start">
                 <div className="w-full max-w-[94%] rounded-[18px] rounded-bl-sm border border-slate-200/80 bg-white p-4 card-shadow">
-                  <p className="text-sm font-semibold leading-relaxed text-[#071C2D]">{msg.text}</p>
+                  <p className="whitespace-pre-line text-sm font-semibold leading-relaxed text-[#071C2D]">
+                    {msg.text}
+                  </p>
+
+                  {msg.sources && msg.sources.length > 0 && (
+                    <div className="mt-3 border-t border-slate-100 pt-2.5">
+                      <p className="mb-1.5 flex items-center gap-1 text-[11px] font-bold text-[#5C7B98]">
+                        <Globe className="h-3 w-3 text-[#1F69FC]" />
+                        Fuentes en Google
+                      </p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {msg.sources.map((src) => (
+                          <a
+                            key={src.uri}
+                            href={src.uri}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex max-w-full items-center gap-1 rounded-full border border-slate-200 bg-[#F8FAFC] px-2.5 py-1 text-[11px] font-semibold text-[#1F69FC]"
+                          >
+                            <span className="truncate max-w-[180px]">{src.title}</span>
+                            <ExternalLink className="h-2.5 w-2.5 shrink-0" />
+                          </a>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   {msg.items && msg.items.length > 0 && (
                     <div className="mt-3 space-y-2">
@@ -319,7 +429,7 @@ export const AssistantPage: React.FC = () => {
             <div className="flex justify-start">
               <div className="inline-flex items-center gap-2 rounded-[16px] border border-slate-200 bg-white px-4 py-3 text-xs font-semibold text-[#5C7B98]">
                 <Loader2 className="h-4 w-4 animate-spin text-[#1F69FC]" />
-                Analizando tu inventario...
+                {useWebSearch ? 'Consultando con Gemini y Google...' : 'Analizando tu inventario...'}
               </div>
             </div>
           )}
@@ -338,8 +448,10 @@ export const AssistantPage: React.FC = () => {
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Pregúntale a tu inventario..."
-            maxLength={400}
+            placeholder={
+              useWebSearch ? 'Pregunta con búsqueda en Google...' : 'Pregúntale a tu inventario...'
+            }
+            maxLength={500}
             className="min-h-[46px] flex-1 rounded-full border border-slate-200 bg-white px-4 text-base text-[#071C2D] placeholder:text-slate-400 focus:border-[#1F69FC] focus:outline-none"
           />
           <button
