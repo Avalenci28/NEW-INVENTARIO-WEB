@@ -1,6 +1,6 @@
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {useNavigate, useSearchParams} from 'react-router-dom';
-import {Bot, ExternalLink, Globe, Loader2, Send, ShoppingBag} from 'lucide-react';
+import {Bot, ExternalLink, Globe, Loader2, RefreshCw, Send, ShoppingBag} from 'lucide-react';
 import {GarmentThumbnail} from '../components/GarmentThumbnail';
 import {MobileShell} from '../components/MobileShell';
 import {OrderDraftSheet} from '../components/OrderDraftSheet';
@@ -30,6 +30,8 @@ interface ChatMessage {
   items?: AssistantSuggestedItem[];
   askToCreateOrder?: boolean;
   sources?: GroundingSource[];
+  isError?: boolean;
+  retryQuestion?: string;
 }
 
 const SUGGESTED_CHIPS = [
@@ -61,6 +63,7 @@ export const AssistantPage: React.FC = () => {
   const [orderSheetOpen, setOrderSheetOpen] = useState(false);
 
   const autoTriggeredRef = useRef(false);
+  const inFlightRef = useRef(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   const inventoryContext = useMemo(() => {
@@ -89,7 +92,7 @@ export const AssistantPage: React.FC = () => {
         abcClass: s.abcClass,
       }));
 
-    const inventoryItems = products.slice(0, 60).map((p) => ({
+    const inventoryItems = products.slice(0, 35).map((p) => ({
       name: p.name,
       size: p.size || 'Única',
       category: p.category,
@@ -111,26 +114,32 @@ export const AssistantPage: React.FC = () => {
   }, [profile?.businessName, totalUnits, spaces, products, alerts, abcMap]);
 
   const sendQuestion = useCallback(
-    async (questionText: string, forceWebSearch?: boolean) => {
+    async (questionText: string, forceWebSearch?: boolean, replaceErrorId?: string) => {
       const clean = questionText.trim();
-      if (!clean || sending) return;
+      if (!clean || inFlightRef.current) return;
+
+      inFlightRef.current = true;
+      setSending(true);
 
       const historyPayload = messages
-        .filter((m) => m.id !== 'welcome-ai')
-        .slice(-12)
+        .filter((m) => m.id !== 'welcome-ai' && !m.isError)
+        .slice(-8)
         .map((m) => ({
           role: m.role,
           text: m.text,
         }));
 
-      const userMsg: ChatMessage = {
-        id: `u-${Date.now()}`,
-        role: 'user',
-        text: clean,
-      };
-      setMessages((prev) => [...prev, userMsg]);
-      setInput('');
-      setSending(true);
+      if (replaceErrorId) {
+        setMessages((prev) => prev.filter((m) => m.id !== replaceErrorId));
+      } else {
+        const userMsg: ChatMessage = {
+          id: `u-${Date.now()}`,
+          role: 'user',
+          text: clean,
+        };
+        setMessages((prev) => [...prev, userMsg]);
+        setInput('');
+      }
 
       try {
         const bodyPayload = JSON.stringify({
@@ -149,10 +158,11 @@ export const AssistantPage: React.FC = () => {
         };
 
         let data: AssistantApiPayload | null = null;
+        let failed = false;
 
         for (let attempt = 0; attempt < 2; attempt++) {
           const controller = new AbortController();
-          const timeoutId = window.setTimeout(() => controller.abort(), 20000);
+          const timeoutId = window.setTimeout(() => controller.abort(), 35000);
           try {
             const res = await fetch('/api/assistant', {
               method: 'POST',
@@ -175,12 +185,30 @@ export const AssistantPage: React.FC = () => {
             }
 
             if (!parsed) {
-              if ((res.status === 502 || res.status === 504) && attempt === 0) {
-                await new Promise((r) => window.setTimeout(r, 400));
+              if (res.status === 502 && attempt === 0) {
+                await new Promise((r) => window.setTimeout(r, 350));
                 continue;
               }
+              failed = true;
               data = {
-                error: 'El asistente tardó en responder. Intenta enviar tu pregunta de nuevo.',
+                error:
+                  res.status === 429
+                    ? 'Se alcanzó el límite temporal de consultas. Espera unos segundos y toca "Reintentar".'
+                    : res.status === 504
+                      ? 'La IA se demoró más de lo esperado en responder. Toca "Reintentar".'
+                      : 'El servicio de IA está temporalmente ocupado. Toca "Reintentar".',
+              };
+              break;
+            }
+
+            if (!res.ok || !parsed.text) {
+              failed = true;
+              data = {
+                error:
+                  parsed.error ||
+                  (res.status === 429
+                    ? 'Se alcanzó el límite temporal de consultas a Gemini. Espera unos segundos y reintenta.'
+                    : 'No pudimos obtener respuesta de Gemini. Toca "Reintentar".'),
               };
               break;
             }
@@ -189,7 +217,8 @@ export const AssistantPage: React.FC = () => {
             break;
           } catch (err) {
             window.clearTimeout(timeoutId);
-            if (attempt === 0) {
+            const isAbort = err instanceof Error && err.name === 'AbortError';
+            if (!isAbort && attempt === 0) {
               await new Promise((r) => window.setTimeout(r, 350));
               continue;
             }
@@ -203,29 +232,37 @@ export const AssistantPage: React.FC = () => {
           text:
             data?.text ||
             data?.error ||
-            'No pude consultar con Gemini en este momento. Intenta de nuevo.',
+            'No pude consultar con Gemini en este momento. Toca "Reintentar".',
           items: data?.items,
           askToCreateOrder: data?.askToCreateOrder,
           sources: data?.sources,
+          isError: failed || !data?.text,
+          retryQuestion: failed || !data?.text ? clean : undefined,
         };
         setMessages((prev) => [...prev, replyMsg]);
-      } catch {
+      } catch (err) {
+        const isAbort = err instanceof Error && err.name === 'AbortError';
         setMessages((prev) => [
           ...prev,
           {
             id: `a-${Date.now()}`,
             role: 'assistant',
+            isError: true,
+            retryQuestion: clean,
             text:
               typeof navigator !== 'undefined' && navigator.onLine === false
-                ? 'Sin conexión a internet. Verifica tu Wi-Fi o datos móviles e intenta de nuevo.'
-                : 'No pudimos conectar con Gemini en este momento. Intenta enviar tu pregunta de nuevo.',
+                ? 'Sin conexión a internet. Verifica tu Wi-Fi o datos móviles y toca "Reintentar".'
+                : isAbort
+                  ? 'La IA tardó demasiado en responder esta consulta. Toca "Reintentar".'
+                  : 'No pudimos conectar con Gemini en este momento. Toca "Reintentar".',
           },
         ]);
       } finally {
+        inFlightRef.current = false;
         setSending(false);
       }
     },
-    [sending, messages, useWebSearch, inventoryContext],
+    [messages, useWebSearch, inventoryContext],
   );
 
   // Al iniciar o venir desde "Ver sugerencia" en Inicio, dispara la consulta principal
@@ -293,9 +330,10 @@ export const AssistantPage: React.FC = () => {
           <div className="flex items-center gap-2">
             <button
               type="button"
+              disabled={sending}
               onClick={() => setUseWebSearch((v) => !v)}
               aria-pressed={useWebSearch}
-              className={`flex min-h-[36px] items-center gap-1 rounded-full px-2.5 text-[11px] font-bold transition-colors ${
+              className={`flex min-h-[36px] items-center gap-1 rounded-full px-2.5 text-[11px] font-bold transition-colors disabled:opacity-50 ${
                 useWebSearch
                   ? 'bg-[#1F69FC] text-white'
                   : 'border border-slate-200 bg-slate-50 text-[#5C7B98]'
@@ -325,8 +363,9 @@ export const AssistantPage: React.FC = () => {
             <button
               key={chip}
               type="button"
+              disabled={sending}
               onClick={() => void sendQuestion(chip)}
-              className="min-h-[34px] shrink-0 rounded-full border border-[#1F69FC]/25 bg-white px-3.5 text-xs font-semibold text-[#1F69FC]"
+              className="min-h-[34px] shrink-0 rounded-full border border-[#1F69FC]/25 bg-white px-3.5 text-xs font-semibold text-[#1F69FC] disabled:opacity-50"
             >
               {chip}
             </button>
@@ -344,10 +383,28 @@ export const AssistantPage: React.FC = () => {
               </div>
             ) : (
               <div key={msg.id} className="flex justify-start">
-                <div className="w-full max-w-[94%] rounded-[18px] rounded-bl-sm border border-slate-200/80 bg-white p-4 card-shadow">
+                <div
+                  className={`w-full max-w-[94%] rounded-[18px] rounded-bl-sm border p-4 card-shadow ${
+                    msg.isError
+                      ? 'border-[#EF8D2A]/45 bg-[#FFF9F2]'
+                      : 'border-slate-200/80 bg-white'
+                  }`}
+                >
                   <p className="whitespace-pre-line text-sm font-semibold leading-relaxed text-[#071C2D]">
                     {msg.text}
                   </p>
+
+                  {msg.isError && msg.retryQuestion && (
+                    <button
+                      type="button"
+                      disabled={sending}
+                      onClick={() => void sendQuestion(msg.retryQuestion!, undefined, msg.id)}
+                      className="mt-3 inline-flex min-h-[40px] items-center gap-1.5 rounded-[12px] bg-[#1F69FC] px-4 text-xs font-bold text-white shadow-xs active:scale-95 disabled:opacity-50"
+                    >
+                      <RefreshCw className="h-3.5 w-3.5" />
+                      Reintentar
+                    </button>
+                  )}
 
                   {msg.sources && msg.sources.length > 0 && (
                     <div className="mt-3 border-t border-slate-100 pt-2.5">
@@ -427,9 +484,16 @@ export const AssistantPage: React.FC = () => {
 
           {sending && (
             <div className="flex justify-start">
-              <div className="inline-flex items-center gap-2 rounded-[16px] border border-slate-200 bg-white px-4 py-3 text-xs font-semibold text-[#5C7B98]">
-                <Loader2 className="h-4 w-4 animate-spin text-[#1F69FC]" />
-                {useWebSearch ? 'Consultando con Gemini y Google...' : 'Analizando tu inventario...'}
+              <div className="inline-flex items-center gap-2.5 rounded-[16px] border border-slate-200 bg-white px-4 py-3 text-xs font-semibold text-[#071C2D]">
+                <Loader2 className="h-4 w-4 shrink-0 animate-spin text-[#1F69FC]" />
+                <div>
+                  <p>
+                    {useWebSearch
+                      ? 'Consultando con Gemini y Google...'
+                      : 'Gemini está analizando tu inventario...'}
+                  </p>
+                  <p className="text-[11px] font-medium text-[#5C7B98]">Esto toma unos segundos</p>
+                </div>
               </div>
             </div>
           )}

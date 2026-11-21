@@ -58,6 +58,7 @@ export const ScanPage: React.FC = () => {
   const streamRef = useRef<MediaStream | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const autoScanRanRef = useRef(false);
+  const inFlightRef = useRef(false);
 
   const stopCamera = useCallback(() => {
     if (streamRef.current) {
@@ -266,7 +267,7 @@ export const ScanPage: React.FC = () => {
       let lastErr: unknown;
       for (let attempt = 0; attempt < 2; attempt++) {
         const controller = new AbortController();
-        const timeoutId = window.setTimeout(() => controller.abort(), 20000);
+        const timeoutId = window.setTimeout(() => controller.abort(), 30000);
         try {
           const res = await fetch('/api/recognize', {
             method: 'POST',
@@ -297,14 +298,27 @@ export const ScanPage: React.FC = () => {
           }
 
           if (!parsedData) {
-            if ((res.status === 502 || res.status === 504) && attempt === 0) {
-              await new Promise((r) => window.setTimeout(r, 400));
+            if (res.status === 502 && attempt === 0) {
+              await new Promise((r) => window.setTimeout(r, 350));
               continue;
             }
             if (res.status === 413) {
               return {
                 ok: false,
                 error: 'La foto es muy pesada. Acércate un poco más o intenta con otra foto.',
+              };
+            }
+            if (res.status === 429) {
+              return {
+                ok: false,
+                error:
+                  'Se alcanzó el límite temporal de consultas a Gemini. Espera unos segundos e intenta de nuevo.',
+              };
+            }
+            if (res.status === 500 || res.status === 503) {
+              return {
+                ok: false,
+                error: 'El servicio de IA está temporalmente ocupado. Toca "Reintentar con IA".',
               };
             }
             if (res.status === 401 || res.status === 403 || res.redirected) {
@@ -323,10 +337,12 @@ export const ScanPage: React.FC = () => {
         } catch (err) {
           window.clearTimeout(timeoutId);
           lastErr = err;
-          if (attempt === 0) {
+          const isAbort = err instanceof Error && err.name === 'AbortError';
+          if (!isAbort && attempt === 0) {
             await new Promise((r) => window.setTimeout(r, 350));
             continue;
           }
+          break;
         }
       }
 
@@ -352,6 +368,8 @@ export const ScanPage: React.FC = () => {
 
   const recognizeImage = useCallback(
     async (dataUrl: string, mimeType: string, isAuto: boolean = false) => {
+      if (inFlightRef.current) return;
+      inFlightRef.current = true;
       setAnalyzing(true);
       setAiError(null);
       setNoGarmentHint(false);
@@ -396,6 +414,7 @@ export const ScanPage: React.FC = () => {
           showToast(msg, 'error');
         }
       } finally {
+        inFlightRef.current = false;
         setAnalyzing(false);
       }
     },
@@ -409,6 +428,7 @@ export const ScanPage: React.FC = () => {
       !cameraReady ||
       !autoScanEnabled ||
       autoScanRanRef.current ||
+      inFlightRef.current ||
       analyzing ||
       detected
     ) {
@@ -417,7 +437,7 @@ export const ScanPage: React.FC = () => {
 
     const timer = window.setTimeout(() => {
       const video = videoRef.current;
-      if (!video || autoScanRanRef.current) return;
+      if (!video || autoScanRanRef.current || inFlightRef.current) return;
       try {
         const {dataUrl, mimeType, isDark} = captureVideoFrame(video, 512, 0.7);
         if (isDark) {
@@ -435,7 +455,7 @@ export const ScanPage: React.FC = () => {
   }, [mode, cameraReady, autoScanEnabled, analyzing, detected, recognizeImage]);
 
   const handleCapture = async () => {
-    if (analyzing) return;
+    if (inFlightRef.current || analyzing) return;
     if (mode === 'barcode') {
       setManualBarcodeOpen(true);
       return;
@@ -457,7 +477,7 @@ export const ScanPage: React.FC = () => {
   const handleGalleryFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
-    if (!file) return;
+    if (!file || inFlightRef.current || analyzing) return;
     try {
       setDetected(null);
       const {dataUrl, mimeType} = await compressImageFile(file, 512, 0.7);
@@ -584,10 +604,13 @@ export const ScanPage: React.FC = () => {
             <span className="absolute bottom-0 right-0 h-8 w-8 rounded-br-xl border-b-4 border-r-4 border-[#24B570]" />
 
             {analyzing && (
-              <div className="flex flex-col items-center gap-2 rounded-2xl bg-black/70 px-5 py-4 backdrop-blur-md">
+              <div className="flex flex-col items-center gap-1.5 rounded-2xl bg-black/75 px-5 py-4 text-center backdrop-blur-md">
                 <Loader2 className="h-7 w-7 animate-spin text-[#24B570]" />
-                <span className="text-xs font-semibold text-white">
-                  Identificando prenda con IA...
+                <span className="text-xs font-bold text-white">
+                  Identificando prenda con Gemini IA...
+                </span>
+                <span className="text-[11px] font-medium text-slate-300">
+                  Esto toma unos segundos
                 </span>
               </div>
             )}
@@ -626,8 +649,9 @@ export const ScanPage: React.FC = () => {
                 {lastCaptured && (
                   <button
                     type="button"
+                    disabled={analyzing}
                     onClick={() => void recognizeImage(lastCaptured.dataUrl, lastCaptured.mimeType)}
-                    className="flex min-h-[42px] flex-1 items-center justify-center gap-1.5 rounded-[12px] bg-[#1F69FC] px-3 text-xs font-bold text-white"
+                    className="flex min-h-[42px] flex-1 items-center justify-center gap-1.5 rounded-[12px] bg-[#1F69FC] px-3 text-xs font-bold text-white disabled:opacity-50"
                   >
                     <RefreshCw className="h-3.5 w-3.5" />
                     Reintentar con IA
@@ -687,8 +711,9 @@ export const ScanPage: React.FC = () => {
             <button
               type="button"
               aria-label="Elegir de la galería"
+              disabled={analyzing}
               onClick={() => fileInputRef.current?.click()}
-              className="flex h-12 w-12 items-center justify-center rounded-full bg-white/15 text-white backdrop-blur-sm active:scale-95"
+              className="flex h-12 w-12 items-center justify-center rounded-full bg-white/15 text-white backdrop-blur-sm active:scale-95 disabled:opacity-45"
             >
               <ImageIcon className="h-5 w-5" />
             </button>
@@ -710,13 +735,14 @@ export const ScanPage: React.FC = () => {
             <button
               type="button"
               aria-label="Cambiar a escáner de código de barras"
+              disabled={analyzing}
               onClick={() => {
                 setDetected(null);
                 setAiError(null);
                 setNoGarmentHint(false);
                 setMode((m) => (m === 'garment' ? 'barcode' : 'garment'));
               }}
-              className={`flex h-12 w-12 items-center justify-center rounded-full backdrop-blur-sm active:scale-95 ${
+              className={`flex h-12 w-12 items-center justify-center rounded-full backdrop-blur-sm active:scale-95 disabled:opacity-45 ${
                 mode === 'barcode' ? 'bg-[#EF8D2A] text-white' : 'bg-white/15 text-white'
               }`}
             >

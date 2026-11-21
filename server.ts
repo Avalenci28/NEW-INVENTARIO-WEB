@@ -169,15 +169,17 @@ function getGeminiClient(): GoogleGenAI | null {
   });
 }
 
-function isTransientGeminiError(err: unknown): boolean {
+function isTimeoutGeminiError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   const name = err instanceof Error ? err.name : '';
+  return name === 'TimeoutError' || name === 'AbortError' || /aborted due to timeout|DEADLINE_EXCEEDED/i.test(msg);
+}
+
+function isTransientGeminiError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
   return (
-    name === 'TimeoutError' ||
-    name === 'AbortError' ||
-    /503|UNAVAILABLE|504|DEADLINE_EXCEEDED|high demand|aborted due to timeout|ECONNRESET|fetch failed/i.test(
-      msg,
-    )
+    isTimeoutGeminiError(err) ||
+    /500|INTERNAL|503|UNAVAILABLE|504|high demand|ECONNRESET|fetch failed|network/i.test(msg)
   );
 }
 
@@ -189,25 +191,20 @@ function isQuotaOrRateError(err: unknown): boolean {
 async function generateWithResilience(
   ai: GoogleGenAI,
   params: Omit<Parameters<GoogleGenAI['models']['generateContent']>[0], 'model'>,
-  options: {preferFast?: boolean; timeoutMs?: number; allowLiteFallback?: boolean} = {},
+  options: {preferFast?: boolean; timeoutMs?: number; singleAttempt?: boolean} = {},
 ) {
-  const {preferFast = false, timeoutMs = 8000, allowLiteFallback = true} = options;
+  const {preferFast = false, timeoutMs = 10000, singleAttempt = false} = options;
 
-  const attempts: Array<{model: string; delayMs: number; timeoutMs: number}> = preferFast
-    ? [
-        {model: GEMINI_FALLBACK_MODEL, delayMs: 0, timeoutMs: 6500},
-        {model: GEMINI_FALLBACK_MODEL, delayMs: 200, timeoutMs: 6500},
-        {model: GEMINI_MODEL, delayMs: 250, timeoutMs},
-      ]
-    : allowLiteFallback
+  const attempts: Array<{model: string; delayMs: number; timeoutMs: number}> = singleAttempt
+    ? [{model: GEMINI_MODEL, delayMs: 0, timeoutMs}]
+    : preferFast
       ? [
-          {model: GEMINI_MODEL, delayMs: 0, timeoutMs: 5500},
-          {model: GEMINI_FALLBACK_MODEL, delayMs: 150, timeoutMs},
-          {model: GEMINI_FALLBACK_MODEL, delayMs: 400, timeoutMs},
+          {model: GEMINI_FALLBACK_MODEL, delayMs: 0, timeoutMs: 11000},
+          {model: GEMINI_MODEL, delayMs: 300, timeoutMs: 12000},
         ]
       : [
-          {model: GEMINI_MODEL, delayMs: 0, timeoutMs},
-          {model: GEMINI_FALLBACK_MODEL, delayMs: 200, timeoutMs},
+          {model: GEMINI_MODEL, delayMs: 0, timeoutMs: 12000},
+          {model: GEMINI_FALLBACK_MODEL, delayMs: 300, timeoutMs: 10000},
         ];
 
   let lastError: unknown;
@@ -370,16 +367,25 @@ app.post('/api/recognize', async (req, res) => {
           },
         },
       },
-      {preferFast: true, timeoutMs: 7500},
+      {preferFast: true, timeoutMs: 10000},
     );
 
-    const rawJson = extractJsonObject(response.text ?? '{}');
+    const responseText = (response.text || '').trim();
+    if (!responseText) {
+      throw new Error('Respuesta vacía de Gemini en /api/recognize');
+    }
+
+    const rawJson = extractJsonObject(responseText);
     const normalizedCategory = normalizeCategory(String(rawJson.category || 'otro'));
     const isGarment = rawJson.isGarment !== false;
+    const rawName = typeof rawJson.name === 'string' ? rawJson.name.trim() : '';
+    if (isGarment && !rawName) {
+      throw new Error('La respuesta de Gemini no incluyó el nombre de la prenda');
+    }
 
     const validated = RecognizeResponseSchema.parse({
       isGarment,
-      name: String(rawJson.name || (isGarment ? 'Prenda detectada' : 'Sin prenda')).slice(0, 80),
+      name: (rawName || 'Sin prenda detectada').slice(0, 80),
       category: normalizedCategory,
       color: String(rawJson.color || 'Neutro').slice(0, 30),
       confidence: Math.max(1, Math.min(100, Math.round(Number(rawJson.confidence) || 88))),
@@ -389,10 +395,10 @@ app.post('/api/recognize', async (req, res) => {
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     console.error('Error en /api/recognize:', errMsg);
-    if (/429|RESOURCE_EXHAUSTED/i.test(errMsg)) {
+    if (isQuotaOrRateError(err)) {
       res.status(429).json({
         error:
-          'Cuota de IA alcanzada temporalmente. Intenta en unos segundos o registra la prenda a mano.',
+          'Se alcanzó el límite temporal de consultas a Gemini. Espera unos segundos e intenta de nuevo.',
       });
       return;
     }
@@ -403,10 +409,23 @@ app.post('/api/recognize', async (req, res) => {
       });
       return;
     }
-    if (isTransientGeminiError(err)) {
+    if (isTimeoutGeminiError(err)) {
+      res.status(504).json({
+        error:
+          'El reconocimiento tardó más de lo esperado. Toca "Reintentar con IA" o toma una foto más cercana.',
+      });
+      return;
+    }
+    if (/500|INTERNAL/i.test(errMsg)) {
+      res.status(500).json({
+        error: 'El servicio de IA tuvo un fallo interno temporal. Toca "Reintentar con IA".',
+      });
+      return;
+    }
+    if (/503|UNAVAILABLE|504|high demand/i.test(errMsg)) {
       res.status(503).json({
         error:
-          'La IA está ocupada en este momento. Toca "Reintentar con IA" o registra la prenda a mano.',
+          'El servicio de Gemini está con alta demanda en este momento. Toca "Reintentar con IA".',
       });
       return;
     }
@@ -474,66 +493,9 @@ const AssistantRequestSchema = z.object({
   }),
 });
 
-function buildRuleBasedReply(
-  question: string,
-  ctx: z.infer<typeof AssistantRequestSchema>['inventoryContext'],
-) {
-  const q = question.toLowerCase();
-  const topItems = ctx.recommendations.slice(0, 3);
-
-  if (ctx.recommendations.length === 0) {
-    return {
-      text: `¡Todo va muy bien en ${ctx.businessName}! Tienes ${ctx.totalUnits} prendas en ${ctx.totalSpaces} espacios y ninguna requiere reposición urgente en este momento.`,
-      items: [],
-      askToCreateOrder: false,
-      sources: [],
-    };
-  }
-
-  if (q.includes('rotan') || q.includes('vende') || q.includes('más')) {
-    const moversText =
-      ctx.topMovers.length > 0
-        ? ctx.topMovers
-            .slice(0, 3)
-            .map((m) => `${m.name} (${m.sold30d} vendidas este mes, clase ${m.abcClass})`)
-            .join(', ')
-        : topItems.map((i) => i.name).join(', ');
-    return {
-      text: `Las prendas con mayor movimiento en ${ctx.businessName} son: ${moversText}. Estas prendas clase A requieren reposición prioritaria para no perder ventas.`,
-      items: topItems.map((item) => ({
-        productId: item.productId,
-        nombre: item.name,
-        size: item.size,
-        category: item.category,
-        quedan: item.quantity,
-        pedir: item.suggestedQty,
-      })),
-      askToCreateOrder: true,
-      sources: [],
-    };
-  }
-
-  return {
-    text:
-      topItems.length === 1
-        ? `Esta prenda se vende rápido y quedan pocas unidades en ${ctx.businessName}:`
-        : 'Estas prendas se venden rápido y quedan pocas unidades:',
-    items: topItems.map((item) => ({
-      productId: item.productId,
-      nombre: item.name,
-      size: item.size,
-      category: item.category,
-      quedan: item.quantity,
-      pedir: item.suggestedQty,
-    })),
-    askToCreateOrder: true,
-    sources: [],
-  };
-}
-
 function shouldEnableWebSearch(question: string, explicitFlag?: boolean): boolean {
   if (explicitFlag) return true;
-  return /tendencia|moda|temporada|colombia|mercado|precio|mayorista|telas?|cuidado|lavad|clima|google|internet|actual|2025|2026|colecci[oó]n|estilo/i.test(
+  return /tendencia|moda actual|temporada \d{4}|google|en internet|buscar en web|mercado colombiano/i.test(
     question,
   );
 }
@@ -545,8 +507,15 @@ app.post('/api/assistant', async (req, res) => {
     return;
   }
 
+  const rateKey = `assistant:${req.ip || 'anon'}`;
+  if (!checkRateLimit(rateKey)) {
+    res.status(429).json({
+      error: 'Has enviado muchas consultas seguidas. Espera un momento antes de intentar de nuevo.',
+    });
+    return;
+  }
+
   const {question, history = [], useWebSearch, inventoryContext} = parsed.data;
-  const fallback = buildRuleBasedReply(question, inventoryContext);
 
   const ai = getGeminiClient();
   if (!ai) {
@@ -558,27 +527,36 @@ app.post('/api/assistant', async (req, res) => {
 
   try {
     const selectedItems = inventoryContext.recommendations.slice(0, 8);
+    const compactCatalog = (inventoryContext.inventoryItems || []).slice(0, 35).map((item) => ({
+      n: item.name,
+      t: item.size,
+      q: item.quantity,
+      min: item.minStock,
+      esp: item.spaceName,
+      abc: item.abcClass,
+    }));
+
     const contextSummary = JSON.stringify({
       negocio: inventoryContext.businessName,
       totalPrendas: inventoryContext.totalUnits,
       espacios: inventoryContext.totalSpaces,
-      productosBajoStock: inventoryContext.lowStockCount,
-      candidatosAReponer: selectedItems.map((item) => ({
+      bajoStock: inventoryContext.lowStockCount,
+      reponer: selectedItems.map((item) => ({
         id: item.productId,
-        nombre: item.name,
-        talla: item.size,
-        quedan: item.quantity,
-        minimo: item.minStock,
-        sugeridoPedir: item.suggestedQty,
-        claseABC: item.abcClass,
-        diasCobertura: item.daysRemaining,
+        n: item.name,
+        t: item.size,
+        q: item.quantity,
+        min: item.minStock,
+        pedir: item.suggestedQty,
+        abc: item.abcClass,
+        dias: item.daysRemaining,
         motivo: item.reason,
       })),
-      masVendidos30d: inventoryContext.topMovers,
-      catalogoActual: inventoryContext.inventoryItems || [],
+      top30d: inventoryContext.topMovers.slice(0, 5),
+      catalogo: compactCatalog,
     });
 
-    const historyTurns = history.slice(-10).map((msg) => ({
+    const historyTurns = history.slice(-8).map((msg) => ({
       role: msg.role === 'assistant' ? ('model' as const) : ('user' as const),
       parts: [{text: msg.text}],
     }));
@@ -593,7 +571,7 @@ app.post('/api/assistant', async (req, res) => {
             role: 'user' as const,
             parts: [
               {
-                text: `Pregunta del dueño de "${inventoryContext.businessName}": "${question}"\n\nContexto real de su tienda (no inventes prendas que no estén aquí):\n${contextSummary}`,
+                text: `Pregunta: "${question}"\nInventario actual (${inventoryContext.businessName}):\n${contextSummary}`,
               },
             ],
           },
@@ -609,10 +587,10 @@ app.post('/api/assistant', async (req, res) => {
                 thinkingLevel: ThinkingLevel.LOW,
               },
               systemInstruction:
-                'Eres el Asistente IA de "Inventario Fácil IA" para tiendas de ropa en Colombia. Combina datos actualizados de Google Search con el inventario real de la tienda. Responde en español colombiano claro, práctico y cercano (máximo 4 o 5 frases). No inventes cifras ni existencias del inventario.',
+                'Asistente de "Inventario Fácil IA" en Colombia. Responde con datos reales de Google Search y del inventario entregado en máximo 4 frases claras en español colombiano. No inventes existencias.',
             },
           },
-          {preferFast: false, timeoutMs: 8500, allowLiteFallback: true},
+          {preferFast: false, timeoutMs: 8500, singleAttempt: true},
         );
 
         const rawChunks =
@@ -643,7 +621,6 @@ app.post('/api/assistant', async (req, res) => {
           return;
         }
       } catch (searchErr) {
-        // Si Search Grounding alcanza cuota o falla, continuar con el chat normal de Gemini
         console.warn(
           'Search grounding omitido, continuando con chat Gemini:',
           searchErr instanceof Error ? searchErr.message : String(searchErr),
@@ -657,7 +634,7 @@ app.post('/api/assistant', async (req, res) => {
         role: 'user' as const,
         parts: [
           {
-            text: `Pregunta del dueño de "${inventoryContext.businessName}": "${question}"\n\nDatos reales del inventario (NO inventes cifras ni prendas):\n${contextSummary}`,
+            text: `Pregunta: "${question}"\nInventario real:\n${contextSummary}`,
           },
         ],
       },
@@ -672,31 +649,30 @@ app.post('/api/assistant', async (req, res) => {
             thinkingLevel: ThinkingLevel.LOW,
           },
           systemInstruction:
-            'Eres el Asistente IA de "Inventario Fácil IA" para pequeños comercios de ropa en Colombia. Mantienes el hilo de la conversación y respondes cualquier duda sobre inventario, ventas, rotación ABC, organización de espacios o recomendaciones comerciales en español colombiano natural, claro y cercano (sin tecnicismos, máximo 3 o 4 frases). Usa ÚNICAMENTE los productos y cifras reales del contexto. Si el usuario pregunta qué pedir, qué falta o qué reponer, marca includeOrderItems=true y selecciona hasta 5 IDs de candidatosAReponer; si es una pregunta conversacional o sobre otra prenda con buen stock, marca includeOrderItems=false.',
+            'Eres el Asistente IA de "Inventario Fácil IA" para tiendas de ropa en Colombia. Responde de forma directa, natural y breve (máximo 3 frases en español colombiano) usando SOLO los datos del inventario entregado. Si preguntan qué pedir o reponer, pon includeOrderItems=true y elige hasta 5 IDs de "reponer". Para otras preguntas, pon includeOrderItems=false.',
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
             properties: {
               text: {
                 type: Type.STRING,
-                description: 'Respuesta conversacional breve en español colombiano.',
+                description: 'Respuesta breve en español colombiano.',
               },
               includeOrderItems: {
                 type: Type.BOOLEAN,
-                description:
-                  'true solo si conviene mostrar tarjetas de reposición y ofrecer armar el pedido.',
+                description: 'true solo si conviene ofrecer armar pedido de reposición.',
               },
               selectedProductIds: {
                 type: Type.ARRAY,
                 items: {type: Type.STRING},
-                description: 'IDs de hasta 5 productos relevantes de candidatosAReponer.',
+                description: 'IDs de hasta 5 productos relevantes de reponer.',
               },
             },
             required: ['text', 'includeOrderItems', 'selectedProductIds'],
           },
         },
       },
-      {preferFast: false, timeoutMs: 8500, allowLiteFallback: true},
+      {preferFast: false, timeoutMs: 10000},
     );
 
     const raw = extractJsonObject(response.text ?? '{}') as {
@@ -704,6 +680,11 @@ app.post('/api/assistant', async (req, res) => {
       includeOrderItems?: boolean;
       selectedProductIds?: string[];
     };
+
+    const replyText = (raw.text || '').trim();
+    if (!replyText) {
+      throw new Error('Respuesta vacía de Gemini');
+    }
 
     const allowedMap = new Map(selectedItems.map((i) => [i.productId, i]));
     const pickedIds = Array.isArray(raw.selectedProductIds)
@@ -726,7 +707,7 @@ app.post('/api/assistant', async (req, res) => {
     const showItems = Boolean(raw.includeOrderItems) && finalItems.length > 0;
 
     res.json({
-      text: (raw.text || fallback.text).trim(),
+      text: replyText,
       items: showItems ? finalItems : [],
       askToCreateOrder: showItems,
       sources: [],
@@ -735,9 +716,10 @@ app.post('/api/assistant', async (req, res) => {
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     console.error('Error en /api/assistant:', errMsg);
-    if (/429|RESOURCE_EXHAUSTED/i.test(errMsg)) {
+    if (isQuotaOrRateError(err)) {
       res.status(429).json({
-        error: 'La cuota de Gemini se alcanzó temporalmente. Espera unos segundos e intenta de nuevo.',
+        error:
+          'Se alcanzó el límite temporal de consultas a Gemini. Espera unos segundos e intenta de nuevo.',
       });
       return;
     }
@@ -747,8 +729,20 @@ app.post('/api/assistant', async (req, res) => {
       });
       return;
     }
+    if (isTimeoutGeminiError(err)) {
+      res.status(504).json({
+        error: 'La IA se demoró más de lo esperado en responder. Toca "Reintentar" para consultarla de nuevo.',
+      });
+      return;
+    }
+    if (/500|INTERNAL/i.test(errMsg)) {
+      res.status(500).json({
+        error: 'El servicio de Gemini tuvo un error interno temporal. Toca "Reintentar".',
+      });
+      return;
+    }
     res.status(503).json({
-      error: 'Gemini tardó demasiado o está ocupado en este momento. Intenta enviar tu pregunta de nuevo.',
+      error: 'Gemini está ocupado en este momento. Toca "Reintentar" en unos segundos.',
     });
   }
 });
