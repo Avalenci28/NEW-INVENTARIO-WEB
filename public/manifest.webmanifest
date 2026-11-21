@@ -1,0 +1,33 @@
+{
+  "id": "/",
+  "name": "Inventario Fácil IA",
+  "short_name": "InventarioIA",
+  "description": "Tu inventario inteligente, siempre bajo control. Registra, alerta y decide con IA.",
+  "lang": "es-CO",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0A1F32",
+  "theme_color": "#0A1F32",
+  "icons": [
+    {
+      "src": "/pwa-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-maskable-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

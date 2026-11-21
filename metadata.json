@@ -1,0 +1,6 @@
+{
+  "name": "Inventario Fácil IA",
+  "description": "Tu inventario inteligente, siempre bajo control. Registra prendas con la cámara e IA, recibe alertas anticipadas y genera pedidos listos para WhatsApp.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <rect width="512" height="512" rx="112" fill="#0A1F32"/>
+  <!-- Estante -->
+  <path d="M138 118C138 111.373 143.373 106 150 106H168V386H138V118Z" fill="#2A4660"/>
+  <path d="M344 106H362C368.627 106 374 111.373 374 118V386H344V106Z" fill="#2A4660"/>
+  <rect x="138" y="346" width="236" height="24" rx="6" fill="#1E354B"/>
+  <rect x="138" y="216" width="236" height="22" rx="6" fill="#1E354B"/>
+  <!-- Caja superior -->
+  <rect x="206" y="132" width="100" height="84" rx="10" fill="#F2B449"/>
+  <rect x="244" y="132" width="24" height="36" rx="4" fill="#EF8D2A"/>
+  <!-- Caja principal con etiqueta IA -->
+  <rect x="174" y="218" width="164" height="128" rx="14" fill="#F6BE57"/>
+  <rect x="236" y="218" width="40" height="44" rx="4" fill="#EF8D2A"/>
+  <rect x="210" y="268" width="92" height="54" rx="10" fill="#0A1F32"/>
+  <text x="256" y="305" text-anchor="middle" fill="#FFFFFF" font-family="system-ui, -apple-system, sans-serif" font-weight="800" font-size="34" letter-spacing="1">IA</text>
+</svg>

@@ -1,0 +1,284 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "Perfil de usuario y negocio",
+      "description": "Información privada del propietario del negocio y aceptación de la Ley 1581 de 2012.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "UID de Firebase Auth del propietario.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "fullName": {
+          "type": "string",
+          "description": "Nombre completo del usuario.",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "businessName": {
+          "type": "string",
+          "description": "Nombre de la tienda o emprendimiento.",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Correo electrónico de la cuenta.",
+          "minLength": 3,
+          "maxLength": 180
+        },
+        "acceptedTermsAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Fecha ISO de aceptación de tratamiento de datos (Ley 1581 de 2012).",
+          "maxLength": 40
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Fecha de creación en servidor."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Fecha de actualización en servidor."
+        }
+      },
+      "required": ["userId", "fullName", "businessName", "email", "acceptedTermsAt", "createdAt", "updatedAt"]
+    },
+    "Space": {
+      "title": "Espacio de inventario",
+      "description": "Ubicación física donde se almacenan prendas (Estante, Bodega, Vitrina, Otro).",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "type": {
+          "type": "string",
+          "enum": ["estante", "bodega", "vitrina", "otro"]
+        },
+        "color": {
+          "type": "string",
+          "enum": ["#1F69FC", "#EF8D2A", "#24B570", "#16A297", "#5C7B98"]
+        },
+        "location": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["userId", "name", "type", "color", "location", "createdAt", "updatedAt"]
+    },
+    "Product": {
+      "title": "Prenda o producto",
+      "description": "Artículo de inventario con stock actual, mínimo de alerta y metadatos de reconocimiento IA.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "spaceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "category": {
+          "type": "string",
+          "enum": ["camiseta", "jean", "pantalón", "buzo", "gorra", "zapatos", "accesorio", "otro"]
+        },
+        "size": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20
+        },
+        "color": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "quantity": {
+          "type": "integer",
+          "description": "Cantidad disponible (>= 0)."
+        },
+        "minStock": {
+          "type": "integer",
+          "description": "Umbral mínimo de alerta (>= 0)."
+        },
+        "autoMinStock": {
+          "type": "boolean",
+          "description": "Si el mínimo se ajusta automáticamente según velocidad de rotación (Idea SIT 4)."
+        },
+        "barcode": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "imageUrl": {
+          "type": "string",
+          "maxLength": 180000
+        },
+        "aiRecognized": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "userId",
+        "spaceId",
+        "name",
+        "category",
+        "size",
+        "color",
+        "quantity",
+        "minStock",
+        "autoMinStock",
+        "barcode",
+        "imageUrl",
+        "aiRecognized",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Movement": {
+      "title": "Movimiento de inventario",
+      "description": "Registro inmutable de entradas y salidas para trazabilidad y clasificación ABC.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "productId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "productName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "spaceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["entrada", "salida"]
+        },
+        "quantity": {
+          "type": "integer"
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "occurredAt": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 40
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["userId", "productId", "productName", "spaceId", "type", "quantity", "note", "occurredAt", "createdAt"]
+    },
+    "Order": {
+      "title": "Pedido de reposición",
+      "description": "Pedido armado desde Alertas o Asistente IA, editable y copiable para WhatsApp.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["borrador", "enviado", "recibido"]
+        },
+        "items": {
+          "type": "array",
+          "description": "Lista acotada de máximo 50 prendas a reponer."
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["userId", "status", "items", "notes", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Perfil privado del usuario propietario y nombre de su negocio."
+    },
+    "/users/{userId}/spaces/{spaceId}": {
+      "schema": { "$ref": "#/entities/Space" },
+      "description": "Espacios físicos de almacenamiento pertenecientes al usuario."
+    },
+    "/users/{userId}/products/{productId}": {
+      "schema": { "$ref": "#/entities/Product" },
+      "description": "Prendas registradas por el usuario dentro de sus espacios."
+    },
+    "/users/{userId}/movements/{movementId}": {
+      "schema": { "$ref": "#/entities/Movement" },
+      "description": "Historial de entradas y salidas del inventario del usuario."
+    },
+    "/users/{userId}/orders/{orderId}": {
+      "schema": { "$ref": "#/entities/Order" },
+      "description": "Pedidos de reposición creados desde Alertas o el Asistente IA."
+    }
+  }
+}

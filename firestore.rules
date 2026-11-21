@@ -1,0 +1,215 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Red de seguridad global (Default-Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Primitivas globales endurecidas
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // 3. Validadores por entidad (Validation Blueprints)
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['userId', 'fullName', 'businessName', 'email', 'acceptedTermsAt', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['userId', 'fullName', 'businessName', 'email', 'acceptedTermsAt', 'createdAt', 'updatedAt'])
+        && data.userId is string && data.userId == userId && data.userId == request.auth.uid
+        && data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120
+        && data.businessName is string && data.businessName.size() >= 1 && data.businessName.size() <= 120
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 180
+        && data.acceptedTermsAt is string && data.acceptedTermsAt.size() >= 10 && data.acceptedTermsAt.size() <= 40
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSpace(data, userId) {
+      return data.keys().hasAll(['userId', 'name', 'type', 'color', 'location', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['userId', 'name', 'type', 'color', 'location', 'createdAt', 'updatedAt'])
+        && data.userId is string && data.userId == userId && data.userId == request.auth.uid
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 80
+        && data.type is string && data.type in ['estante', 'bodega', 'vitrina', 'otro']
+        && data.color is string && data.color in ['#1F69FC', '#EF8D2A', '#24B570', '#16A297', '#5C7B98']
+        && data.location is string && data.location.size() <= 120
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidProduct(data, userId) {
+      return data.keys().hasAll([
+          'userId', 'spaceId', 'name', 'category', 'size', 'color',
+          'quantity', 'minStock', 'autoMinStock', 'barcode', 'imageUrl',
+          'aiRecognized', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'userId', 'spaceId', 'name', 'category', 'size', 'color',
+          'quantity', 'minStock', 'autoMinStock', 'barcode', 'imageUrl',
+          'aiRecognized', 'createdAt', 'updatedAt'
+        ])
+        && data.userId is string && data.userId == userId && data.userId == request.auth.uid
+        && isValidId(data.spaceId)
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 120
+        && data.category is string && data.category in ['camiseta', 'jean', 'pantalón', 'buzo', 'gorra', 'zapatos', 'accesorio', 'otro']
+        && data.size is string && data.size.size() >= 1 && data.size.size() <= 20
+        && data.color is string && data.color.size() <= 40
+        && data.quantity is int && data.quantity >= 0 && data.quantity <= 1000000
+        && data.minStock is int && data.minStock >= 0 && data.minStock <= 100000
+        && data.autoMinStock is bool
+        && data.barcode is string && data.barcode.size() <= 64
+        && data.imageUrl is string && data.imageUrl.size() <= 180000
+        && data.aiRecognized is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidMovement(data, userId) {
+      return data.keys().hasAll(['userId', 'productId', 'productName', 'spaceId', 'type', 'quantity', 'note', 'occurredAt', 'createdAt'])
+        && data.keys().hasOnly(['userId', 'productId', 'productName', 'spaceId', 'type', 'quantity', 'note', 'occurredAt', 'createdAt'])
+        && data.userId is string && data.userId == userId && data.userId == request.auth.uid
+        && isValidId(data.productId)
+        && data.productName is string && data.productName.size() >= 1 && data.productName.size() <= 120
+        && isValidId(data.spaceId)
+        && data.type is string && data.type in ['entrada', 'salida']
+        && data.quantity is int && data.quantity >= 1 && data.quantity <= 100000
+        && data.note is string && data.note.size() <= 200
+        && data.occurredAt is string && data.occurredAt.size() >= 10 && data.occurredAt.size() <= 40
+        && data.createdAt is timestamp;
+    }
+
+    function isValidOrder(data, userId) {
+      return data.keys().hasAll(['userId', 'status', 'items', 'notes', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['userId', 'status', 'items', 'notes', 'createdAt', 'updatedAt'])
+        && data.userId is string && data.userId == userId && data.userId == request.auth.uid
+        && data.status is string && data.status in ['borrador', 'enviado', 'recibido']
+        && data.items is list && data.items.size() >= 1 && data.items.size() <= 50
+        && data.items[0] is map
+        && data.items[0].productId is string && data.items[0].productId.size() <= 128
+        && data.notes is string && data.notes.size() <= 500
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // 4. Reglas por colección
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list: if false;
+      allow create: if isValidId(userId) && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(userId) && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'businessName', 'email', 'acceptedTermsAt', 'updatedAt']);
+      allow delete: if isValidId(userId) && isOwner(userId);
+
+      // Espacios de inventario
+      match /spaces/{spaceId} {
+        allow get: if isValidId(userId) && isValidId(spaceId) && isOwner(userId);
+        allow list: if isOwner(userId) && resource.data.userId == request.auth.uid;
+        allow create: if isValidId(userId) && isValidId(spaceId) && isOwner(userId)
+          && isValidSpace(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isValidId(userId) && isValidId(spaceId) && isOwner(userId)
+          && isValidSpace(incoming(), userId)
+          && incoming().userId == existing().userId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'type', 'color', 'location', 'updatedAt']);
+        allow delete: if isValidId(userId) && isValidId(spaceId) && isOwner(userId);
+      }
+
+      // Prendas / productos
+      match /products/{productId} {
+        allow get: if isValidId(userId) && isValidId(productId) && isOwner(userId);
+        allow list: if isOwner(userId) && resource.data.userId == request.auth.uid;
+        allow create: if isValidId(userId) && isValidId(productId) && isOwner(userId)
+          && isValidProduct(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && (
+            exists(/databases/$(database)/documents/users/$(userId)/spaces/$(incoming().spaceId))
+            || existsAfter(/databases/$(database)/documents/users/$(userId)/spaces/$(incoming().spaceId))
+          );
+        allow update: if isValidId(userId) && isValidId(productId) && isOwner(userId)
+          && isValidProduct(incoming(), userId)
+          && incoming().userId == existing().userId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            // Acción 1: Movimiento de stock (entrada/salida)
+            incoming().diff(existing()).affectedKeys().hasOnly(['quantity', 'updatedAt'])
+            ||
+            // Acción 2: Edición de datos de la prenda
+            (
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'spaceId', 'name', 'category', 'size', 'color',
+                'minStock', 'autoMinStock', 'barcode', 'imageUrl', 'updatedAt'
+              ])
+              && exists(/databases/$(database)/documents/users/$(userId)/spaces/$(incoming().spaceId))
+            )
+          );
+        allow delete: if isValidId(userId) && isValidId(productId) && isOwner(userId);
+      }
+
+      // Movimientos de entrada/salida (auditoría inmutable)
+      match /movements/{movementId} {
+        allow get: if isValidId(userId) && isValidId(movementId) && isOwner(userId);
+        allow list: if isOwner(userId) && resource.data.userId == request.auth.uid;
+        allow create: if isValidId(userId) && isValidId(movementId) && isOwner(userId)
+          && isValidMovement(incoming(), userId)
+          && incoming().createdAt == request.time
+          && (
+            exists(/databases/$(database)/documents/users/$(userId)/products/$(incoming().productId))
+            || existsAfter(/databases/$(database)/documents/users/$(userId)/products/$(incoming().productId))
+          );
+        allow update: if false;
+        allow delete: if isValidId(userId) && isValidId(movementId) && isOwner(userId);
+      }
+
+      // Pedidos de reposición
+      match /orders/{orderId} {
+        allow get: if isValidId(userId) && isValidId(orderId) && isOwner(userId);
+        allow list: if isOwner(userId) && resource.data.userId == request.auth.uid;
+        allow create: if isValidId(userId) && isValidId(orderId) && isOwner(userId)
+          && isValidOrder(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isValidId(userId) && isValidId(orderId) && isOwner(userId)
+          && isValidOrder(incoming(), userId)
+          && existing().status != 'recibido'
+          && incoming().userId == existing().userId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            // Acción 1: Editar ítems o notas del borrador
+            incoming().diff(existing()).affectedKeys().hasOnly(['items', 'notes', 'updatedAt'])
+            ||
+            // Acción 2: Cambiar estado (borrador -> enviado -> recibido)
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'items', 'notes', 'updatedAt'])
+          );
+        allow delete: if isValidId(userId) && isValidId(orderId) && isOwner(userId);
+      }
+    }
+  }
+}
